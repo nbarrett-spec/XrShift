@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/XrShift.App/XrShift.App.csproj" />
+    <Project Path="src/XrShift.Probe/XrShift.Probe.csproj" />
+    <Project Path="src/XrShift.Scene/XrShift.Scene.csproj" />
+    <Project Path="src/XrShift.Tracking/XrShift.Tracking.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/XrShift.Scene.Tests/XrShift.Scene.Tests.csproj" />
+    <Project Path="tests/XrShift.Tracking.Tests/XrShift.Tracking.Tests.csproj" />
+  </Folder>
+</Solution>

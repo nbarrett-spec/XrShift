@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <AssemblyName>XrShift</AssemblyName>
+    <ApplicationIcon>XrShift.ico</ApplicationIcon>
+    <Version>1.0.0</Version>
+    <Product>XrShift</Product>
+    <Description>Floating screens for XR glasses on Windows</Description>
+    <RootNamespace>XrShift.App</RootNamespace>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- WFO1000: designer serialization hints; these controls are only ever built in code. -->
+    <NoWarn>$(NoWarn);WFO1000</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
+    <PackageReference Include="Vortice.D3DCompiler" Version="3.8.3" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The hand tracking helper for gesture mode; it runs in its own Python environment (scripts\hands\setup.ps1). -->
+    <None Include="hands\handserver.py" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- The SteamVR driver, when it has been built (src\XrShift.SteamVR\build.cmd). -->
+    <None Include="..\XrShift.SteamVR\xrshift\**\*" Link="steamvr\xrshift\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\..\scripts\hands\setup.ps1" Link="hands\setup.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\XrShift.Tracking\XrShift.Tracking.csproj" />
+    <ProjectReference Include="..\XrShift.Scene\XrShift.Scene.csproj" />
+  </ItemGroup>
+</Project>

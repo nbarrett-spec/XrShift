@@ -1,0 +1,17 @@
+bin/
+obj/
+.vs/
+*.user
+recordings/
+shots/
+dist/
+scripts/glasses/cam/
+
+# Private working notes and research tools (kept out of the public repository)
+CLAUDE.md
+docs/NOTES.md
+docs/CAMERA.md
+scripts/glasses/
+
+# Built by src/XrShift.SteamVR/build.ps1
+src/XrShift.SteamVR/xrshift/bin/
