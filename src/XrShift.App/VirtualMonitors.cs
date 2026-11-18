@@ -1,156 +1,223 @@
-using System.IO.Pipes;
-using System.Text;
-using System.Xml.Linq;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace XrShift.App;
 
 /// <summary>
-/// Talks to the Virtual Display Driver (VirtualDrivers/Virtual-Display-Driver, "VDD by MTT") to add
-/// and remove virtual monitors. The driver keeps its settings in an XML file and takes commands on
-/// a named pipe, one command per connection, as UTF-16 text.
+/// Extra Windows desktops ("virtual monitors") through Parsec's Virtual Display Driver (signed by Parsec,
+/// installed with <c>winget install Parsec.ParsecVDD</c>). XrShift talks to the driver directly: it adds and
+/// removes displays, and pings the driver about every 50 ms while any exist. The driver takes its displays away
+/// by itself when the pings stop, so if XrShift quits or crashes no monitor is ever left behind.
+/// Control protocol as documented by nomi-san/parsec-vdd (core/parsec-vdd.h, BSD licence).
 /// </summary>
 internal static class VirtualMonitors
 {
-    const string PipeName = "MTTVirtualDisplayPipe";
-    const string SettingsPath = @"C:\VirtualDisplayDriver\vdd_settings.xml";
+    static readonly Guid AdapterInterface = new("00b41627-04c4-429e-a26e-0265cf50c8fa");
+    const uint IoctlAdd = 0x0022e004, IoctlRemove = 0x0022a008, IoctlUpdate = 0x0022a00c, IoctlVersion = 0x0022e010;
 
     /// <summary>More than this is asking for trouble: every one is a full desktop Windows has to draw.</summary>
     public const int Max = 6;
 
-    /// <summary>The name Windows gives these monitors; how a virtual monitor is told from a real one.</summary>
+    static readonly object s_gate = new();
+    static SafeFileHandle? s_device;
+    static readonly List<int> s_added = [];
+    static Thread? s_pinger;
+    static volatile bool s_pinging;
+
+    /// <summary>A monitor made by the driver. Parsec's are "ParsecVDA" with the hardware code PSCCDD0.</summary>
     public static bool IsVirtual(DisplayInfo display) =>
-        IsVirtualId(display.Id) || display.MonitorNames.Any(n => n.Contains("VDD by MTT", StringComparison.OrdinalIgnoreCase));
+        IsVirtualId(display.Id) || display.MonitorNames.Any(n => n.Contains("ParsecVDA", StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>The same test for a monitor that may no longer be connected: its device path carries the driver's maker code, e.g. <c>\\?\DISPLAY#MTT1337#...</c>.</summary>
+    /// <summary>The same test from a device path alone (a monitor that may not be connected now). Also knows the
+    /// earlier driver's monitors (#MTT...), so old layouts are recognised.</summary>
     public static bool IsVirtualId(string? id) =>
-        id is not null && id.Contains("#MTT", StringComparison.OrdinalIgnoreCase);
+        id is not null && (id.Contains("#PSCCDD", StringComparison.OrdinalIgnoreCase) || id.Contains("#MTT", StringComparison.OrdinalIgnoreCase));
 
-    /// <summary>
-    /// How many virtual monitors a layout needs. The driver numbers its monitors from the first, and a
-    /// monitor's number shows in its device path (UID256 is the first), so a screen on the third one
-    /// needs three monitors to exist.
-    /// </summary>
-    public static int Needed(XrShift.Scene.Layout layout)
-    {
-        int needed = 0;
-        foreach (XrShift.Scene.ScreenSpec screen in layout.Screens)
-        {
-            if (!IsVirtualId(screen.DisplayName)) continue;
-            System.Text.RegularExpressions.Match m = System.Text.RegularExpressions.Regex.Match(screen.DisplayName!, @"UID(\d+)");
-            int number = m.Success && int.TryParse(m.Groups[1].Value, out int uid) && uid >= 256 ? uid - 256 + 1 : 1;
-            needed = Math.Max(needed, number);
-        }
-        return Math.Min(needed, Max);
-    }
+    /// <summary>How many virtual monitors a layout uses.</summary>
+    public static int Needed(XrShift.Scene.Layout layout) =>
+        Math.Min(layout.Screens.Where(s => IsVirtualId(s.DisplayName) && s.DisplayName!.Contains("#PSCCDD", StringComparison.OrdinalIgnoreCase))
+            .Select(s => s.DisplayName).Distinct(StringComparer.OrdinalIgnoreCase).Count(), Max);
 
-    /// <summary>True if the driver is installed and listening.</summary>
-    public static bool Installed
-    {
-        get
-        {
-            try { return File.Exists(SettingsPath) && File.Exists(@"\\.\pipe\" + PipeName); }
-            catch (IOException) { return false; }
-        }
-    }
+    /// <summary>The driver is installed and answers.</summary>
+    public static bool Installed => DevicePath() is not null;
 
-    /// <summary>How many virtual monitors the driver is set to provide, or null if that cannot be read.</summary>
+    /// <summary>How many virtual monitors XrShift has made, or null if the driver is not there.</summary>
     public static int? Count()
     {
-        try
-        {
-            if (!File.Exists(SettingsPath)) return null;
-            string? text = XDocument.Load(SettingsPath).Root?.Element("monitors")?.Element("count")?.Value;
-            return int.TryParse(text, out int count) ? count : null;
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Xml.XmlException)
-        {
-            return null;
-        }
+        if (!Installed) return null;
+        lock (s_gate) return s_added.Count;
     }
 
-    /// <summary>
-    /// Asks the driver for a number of virtual monitors. It rewrites its settings file and rebuilds
-    /// its monitors; Windows then takes a second or two to show the change.
-    /// </summary>
+    /// <summary>Adds or removes displays until there are this many. Windows takes a moment to show the change.</summary>
     public static bool TrySetCount(int count, out string problem)
     {
-        count = Math.Clamp(count, 0, Max);
-        return TrySend($"SETDISPLAYCOUNT {count}", out _, out problem);
-    }
-
-    /// <summary>
-    /// Makes the driver offer a monitor size it does not have in its list (it comes with 16:9 sizes only, no
-    /// ultrawides): adds the size to its settings file and has it read the file again. All its monitors are
-    /// rebuilt, so Windows takes a second or two to settle afterwards.
-    /// </summary>
-    public static bool TryAddSize(int width, int height, out string problem)
-    {
         problem = "";
-        try
+        count = Math.Clamp(count, 0, Max);
+        lock (s_gate)
         {
-            XDocument file = XDocument.Load(SettingsPath, LoadOptions.PreserveWhitespace);
-            XElement? list = file.Root?.Element("resolutions");
-            if (list is null)
+            try
             {
-                problem = "the driver's settings file has no list of sizes";
+                if (count == s_added.Count) return true;
+                if (!Open(out problem)) return count == 0;
+                while (s_added.Count < count)
+                {
+                    int index = Control(IoctlAdd, []);
+                    if (index < 0) { problem = "the driver would not add a display"; break; }
+                    s_added.Add(index);
+                    Control(IoctlUpdate, []);
+                }
+                while (s_added.Count > count)
+                {
+                    int index = s_added[^1];
+                    s_added.RemoveAt(s_added.Count - 1);
+                    // The index goes as a 16-bit number, high byte first.
+                    Control(IoctlRemove, [(byte)(index >> 8), (byte)index]);
+                    Control(IoctlUpdate, []);
+                }
+                if (s_added.Count > 0) StartPinging();
+                else Close();
+                return problem.Length == 0;
+            }
+            catch (Exception e) when (e is Win32Exception or IOException)
+            {
+                problem = e.Message;
                 return false;
             }
-            static int Number(XElement? e) => int.TryParse(e?.Value.Trim(), out int n) ? n : 0;
-            if (!list.Elements("resolution").Any(r => Number(r.Element("width")) == width && Number(r.Element("height")) == height))
-            {
-                list.Add(new XElement("resolution",
-                    new XElement("width", width), new XElement("height", height), new XElement("refresh_rate", 30)));
-                file.Save(SettingsPath);
-            }
-            return TrySend("RELOAD_DRIVER", out _, out problem);
-        }
-        catch (Exception e) when (e is IOException or UnauthorizedAccessException or System.Xml.XmlException)
-        {
-            problem = e.Message;
-            return false;
         }
     }
 
-    /// <summary>
-    /// Checks the driver takes a command. It is sent a harmless PING; the driver hangs up straight after
-    /// answering, usually before the answer can be read, so only the sending is checked.
-    /// </summary>
-    public static bool Reachable(out string problem) => TrySend("PING", out _, out problem);
-
-    static bool TrySend(string command, out string reply, out string problem, bool wantReply = false)
+    /// <summary>Custom sizes (ultrawides) need settings this driver keeps elsewhere; not offered yet.</summary>
+    public static bool TryAddSize(int width, int height, out string problem)
     {
-        reply = "";
-        problem = "";
-        try
-        {
-            using var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.InOut, PipeOptions.Asynchronous);
-            pipe.Connect(1500);
-            byte[] bytes = Encoding.Unicode.GetBytes(command + "\0");
-            pipe.Write(bytes, 0, bytes.Length);
-            pipe.Flush();
+        problem = $"{width}x{height} is not one of the driver's sizes yet";
+        return false;
+    }
 
-            if (wantReply)
-            {
-                // The answer comes as plain bytes, possibly mixed with log lines; the driver hangs up after one command.
-                var buffer = new byte[512];
-                using var limit = new CancellationTokenSource(1000);
-                try
-                {
-                    int read = pipe.ReadAsync(buffer, 0, buffer.Length, limit.Token).GetAwaiter().GetResult();
-                    reply = Encoding.ASCII.GetString(buffer, 0, read).Replace("\0", "");
-                }
-                catch (OperationCanceledException)
-                {
-                    problem = "the driver did not answer";
-                    return false;
-                }
-            }
+    /// <summary>Checks the driver answers (reads its version).</summary>
+    public static bool Reachable(out string problem)
+    {
+        lock (s_gate)
+        {
+            if (!Open(out problem)) return false;
+            int version = Control(IoctlVersion, []);
+            if (s_added.Count == 0) Close();
+            if (version < 0) { problem = "the driver did not answer"; return false; }
             return true;
         }
-        catch (Exception e) when (e is IOException or TimeoutException or UnauthorizedAccessException)
+    }
+
+    // ---- the driver ------------------------------------------------------------------------------------
+
+    static void StartPinging()
+    {
+        if (s_pinging) return;
+        s_pinging = true;
+        s_pinger = new Thread(() =>
         {
-            problem = e.Message;
+            while (s_pinging)
+            {
+                lock (s_gate)
+                {
+                    if (s_device is null || s_device.IsInvalid) break;
+                    Control(IoctlUpdate, []);
+                }
+                Thread.Sleep(50);
+            }
+        }) { IsBackground = true, Name = "Virtual monitors keep-alive", Priority = ThreadPriority.AboveNormal };
+        s_pinger.Start();
+    }
+
+    static bool Open(out string problem)
+    {
+        problem = "";
+        if (s_device is { IsInvalid: false, IsClosed: false }) return true;
+        string? path = DevicePath();
+        if (path is null) { problem = "the extra-desktop driver is not installed"; return false; }
+        s_device = CreateFile(path, 0xC0000000 /* read, write */, 3 /* share read, write */, IntPtr.Zero, 3 /* open existing */,
+            0x80 | 0x20000000 | 0x40000000 | 0x80000000 /* normal, no buffering, overlapped, write through */, IntPtr.Zero);
+        if (s_device.IsInvalid)
+        {
+            problem = new Win32Exception(Marshal.GetLastWin32Error()).Message;
+            s_device = null;
             return false;
         }
+        return true;
     }
+
+    static void Close()
+    {
+        s_pinging = false;
+        s_device?.Dispose();
+        s_device = null;
+        s_added.Clear();
+    }
+
+    /// <summary>One request to the driver: a 32-byte input, a 4-byte answer, at most 5 s. -1 if it failed.</summary>
+    static unsafe int Control(uint code, byte[] data)
+    {
+        if (s_device is null || s_device.IsInvalid) return -1;
+        byte* input = stackalloc byte[32];
+        for (int i = 0; i < 32; i++) input[i] = i < data.Length ? data[i] : (byte)0;
+        int output = 0;
+        using var done = new ManualResetEvent(false);
+        var overlapped = new NativeOverlapped { EventHandle = done.SafeWaitHandle.DangerousGetHandle() };
+        if (!DeviceIoControl(s_device, code, input, 32, &output, 4, out _, &overlapped) && Marshal.GetLastWin32Error() != 997 /* pending */)
+            return -1;
+        if (!GetOverlappedResultEx(s_device, &overlapped, out _, 5000, false)) return -1;
+        return output;
+    }
+
+    static string? DevicePath()
+    {
+        Guid guid = AdapterInterface;
+        IntPtr set = SetupDiGetClassDevs(ref guid, IntPtr.Zero, IntPtr.Zero, 0x10 | 0x02 /* device interface, present */);
+        if (set == new IntPtr(-1)) return null;
+        try
+        {
+            var data = new SP_DEVICE_INTERFACE_DATA { cbSize = Marshal.SizeOf<SP_DEVICE_INTERFACE_DATA>() };
+            if (!SetupDiEnumDeviceInterfaces(set, IntPtr.Zero, ref guid, 0, ref data)) return null;
+            SetupDiGetDeviceInterfaceDetail(set, ref data, IntPtr.Zero, 0, out int size, IntPtr.Zero);
+            if (size <= 0) return null;
+            IntPtr detail = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.WriteInt32(detail, IntPtr.Size == 8 ? 8 : 6); // cbSize of SP_DEVICE_INTERFACE_DETAIL_DATA_W
+                if (!SetupDiGetDeviceInterfaceDetail(set, ref data, detail, size, out _, IntPtr.Zero)) return null;
+                return Marshal.PtrToStringUni(detail + 4);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(detail);
+            }
+        }
+        finally
+        {
+            SetupDiDestroyDeviceInfoList(set);
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SP_DEVICE_INTERFACE_DATA
+    {
+        public int cbSize;
+        public Guid InterfaceClassGuid;
+        public int Flags;
+        public IntPtr Reserved;
+    }
+
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr SetupDiGetClassDevs(ref Guid classGuid, IntPtr enumerator, IntPtr parent, int flags);
+    [DllImport("setupapi.dll", SetLastError = true)]
+    static extern bool SetupDiEnumDeviceInterfaces(IntPtr set, IntPtr info, ref Guid guid, int index, ref SP_DEVICE_INTERFACE_DATA data);
+    [DllImport("setupapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool SetupDiGetDeviceInterfaceDetail(IntPtr set, ref SP_DEVICE_INTERFACE_DATA data, IntPtr detail, int size, out int required, IntPtr info);
+    [DllImport("setupapi.dll")]
+    static extern bool SetupDiDestroyDeviceInfoList(IntPtr set);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern unsafe bool DeviceIoControl(SafeFileHandle device, uint code, void* input, int inputSize, void* output, int outputSize, out int returned, NativeOverlapped* overlapped);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern unsafe bool GetOverlappedResultEx(SafeFileHandle device, NativeOverlapped* overlapped, out int transferred, uint milliseconds, bool alertable);
 }

@@ -11,6 +11,8 @@ public enum Arrangement
     TwoRows,
     /// <summary>One screen straight ahead at full size, the others smaller beside it.</summary>
     Focus,
+    /// <summary>The chosen screen big, gently curved and straight ahead; every other screen hidden.</summary>
+    Cinema,
 }
 
 public static class Presets
@@ -96,6 +98,20 @@ public static class Presets
                         left += GapDeg + w;
                     }
                 }
+                break;
+            }
+
+            case Arrangement.Cinema:
+            {
+                // Like a cinema: one big screen ahead, wrapped a little so its edges are as near as its middle.
+                ScreenSpec main = shown.FirstOrDefault(s => s.Id == mainId)
+                    ?? shown.OrderBy(s => MathF.Abs(s.YawDeg) + MathF.Abs(s.PitchDeg)).First();
+                (int mw, int mh) = pictureSize(main);
+                placed[main.Id] = main with
+                {
+                    Scale = ScreenSpec.ScaleToFit(mh, optics), YawDeg = 0, PitchDeg = 0, TiltDeg = 0, TurnDeg = 0, CurveDeg = 25, Visible = true,
+                };
+                foreach (ScreenSpec other in shown.Where(s => s.Id != main.Id)) placed[other.Id] = other with { Visible = false };
                 break;
             }
         }

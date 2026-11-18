@@ -240,6 +240,9 @@ internal static class Program
         scene.SetStatus($"{status}   {layout.Screens.Count} screens   view {view.FovDeg:F1}°");
 
         Quaternion trim = Quaternion.CreateFromYawPitchRoll(0, -view.LevelDeg * DegToRad, view.RollDeg * DegToRad);
+        scene.Look(head * trim, false, false, 1f, Number(args, "--easy", view.EasyReading));
+        scene.PointToHiddenScreens(head * trim, optics, view.EdgeArrows);
+        if (args.Contains("--menu")) scene.SetMenu(["Hide all", "Recentre", "Put here", "Next profile", "Close"], 1);
         renderer.Draw(head * trim, optics);
 
         using Bitmap picture = renderer.Capture();

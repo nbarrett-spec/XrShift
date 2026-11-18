@@ -4,27 +4,49 @@ using System.Drawing.Text;
 namespace XrShift.App;
 
 /// <summary>
-/// The look of the app's own windows, "Spatial": a deep blue-black room in which the screens glow, a slim
-/// inspector beside it, Bahnschrift lettering (a DIN face that ships with Windows), and one ice-cyan light
-/// for whatever is selected or switched on.
+/// The look of the app's own windows, "Midnight Aurora": deep navy surfaces that lift toward violet, light text,
+/// a teal glow for whatever is on or selected and a violet second light, rounded cards with a fine bright rim.
+/// Segoe UI Variable for words (Windows 11's own face) and Bahnschrift for numbers.
 /// </summary>
 internal static class Ui
 {
-    public static readonly Color Back = Color.FromArgb(6, 8, 14);          // the window and the top bar
-    public static readonly Color RoomTop = Color.FromArgb(4, 6, 11);
-    public static readonly Color RoomHorizon = Color.FromArgb(12, 22, 42);
-    public static readonly Color RoomFloor = Color.FromArgb(5, 9, 17);
-    public static readonly Color Dock = Color.FromArgb(9, 13, 22);
-    public static readonly Color Inspector = Color.FromArgb(10, 14, 23);
-    public static readonly Color Raised = Color.FromArgb(22, 30, 46);
-    public static readonly Color Line = Color.FromArgb(34, 44, 64);
-    public static readonly Color Ink = Color.FromArgb(238, 243, 250);
-    public static readonly Color Muted = Color.FromArgb(146, 160, 182);
-    public static readonly Color Faint = Color.FromArgb(88, 100, 122);
-    public static readonly Color Accent = Color.FromArgb(107, 228, 255);
-    public static readonly Color AccentDeep = Color.FromArgb(14, 52, 66);
-    public static readonly Color OnAccent = Color.FromArgb(3, 20, 28);
-    public static readonly Color Warn = Color.FromArgb(255, 178, 64);
+    public static readonly Color Back = Color.FromArgb(13, 17, 46);          // the window, the top bar
+    public static readonly Color RoomTop = Color.FromArgb(10, 13, 38);
+    public static readonly Color RoomHorizon = Color.FromArgb(34, 33, 92);
+    public static readonly Color RoomFloor = Color.FromArgb(14, 16, 48);
+    public static readonly Color Dock = Color.FromArgb(17, 22, 60);
+    public static readonly Color Inspector = Color.FromArgb(19, 25, 66);     // panels beside the room, page cards
+    public static readonly Color Raised = Color.FromArgb(31, 39, 102);       // buttons, cards on a panel
+    public static readonly Color Line = Color.FromArgb(48, 56, 122);
+    public static readonly Color Rim = Color.FromArgb(70, 80, 160);          // the fine bright edge of a card
+    public static readonly Color Ink = Color.FromArgb(241, 243, 255);
+    public static readonly Color Muted = Color.FromArgb(170, 178, 222);
+    public static readonly Color Faint = Color.FromArgb(108, 116, 172);
+    public static readonly Color Accent = Color.FromArgb(94, 234, 212);      // teal
+    public static readonly Color Violet = Color.FromArgb(196, 181, 253);
+    public static readonly Color AccentDeep = Color.FromArgb(17, 72, 86);
+    public static readonly Color OnAccent = Color.FromArgb(4, 52, 44);
+    public static readonly Color Warn = Color.FromArgb(251, 191, 36);
+    public static readonly Color Good = Color.FromArgb(134, 239, 172);
+    public static readonly Color Bad = Color.FromArgb(252, 165, 165);
+
+    /// <summary>The aurora backdrop: navy at the top fading to deep violet, with a teal glow top left and a violet one bottom right.</summary>
+    public static void PaintAurora(Graphics g, Rectangle r)
+    {
+        if (r.Width <= 0 || r.Height <= 0) return;
+        using (var sky = new LinearGradientBrush(r, Color.FromArgb(12, 16, 44), Color.FromArgb(28, 20, 70), LinearGradientMode.Vertical))
+            g.FillRectangle(sky, r);
+        Glow(g, new RectangleF(r.Left - r.Width * 0.25f, r.Top - r.Height * 0.6f, r.Width * 0.9f, r.Height * 1.1f), Color.FromArgb(70, 94, 234, 212));
+        Glow(g, new RectangleF(r.Left + r.Width * 0.45f, r.Top + r.Height * 0.35f, r.Width * 0.9f, r.Height * 1.1f), Color.FromArgb(80, 167, 139, 250));
+    }
+
+    static void Glow(Graphics g, RectangleF area, Color centre)
+    {
+        using var path = new GraphicsPath();
+        path.AddEllipse(area);
+        using var brush = new PathGradientBrush(path) { CenterColor = centre, SurroundColors = [Color.FromArgb(0, centre)] };
+        g.FillPath(brush, path);
+    }
 
     // Kept for code that still names the old surfaces.
     public static Color Card => Inspector;
@@ -33,9 +55,11 @@ internal static class Ui
 
     static string Pick(params string[] names) => names.FirstOrDefault(Installed.Contains) ?? "Segoe UI";
 
-    static readonly string TextFace = Pick("Bahnschrift", "Segoe UI");
-    static readonly string StrongFace = Pick("Bahnschrift SemiBold", "Bahnschrift", "Segoe UI Semibold");
+    static readonly string TextFace = Pick("Segoe UI Variable Text", "Segoe UI");
+    static readonly string StrongFace = Pick("Segoe UI Variable Display Semib", "Segoe UI Semibold", "Segoe UI");
     static readonly string NarrowFace = Pick("Bahnschrift SemiCondensed", "Bahnschrift", "Segoe UI");
+    /// <summary>Windows' own icon font, for the side menu.</summary>
+    public static readonly string IconFace = Pick("Segoe Fluent Icons", "Segoe MDL2 Assets");
 
     public static Font Text(float points, bool bold = false) =>
         bold ? new Font(StrongFace, points, FontStyle.Regular) : new Font(TextFace, points, FontStyle.Regular);
@@ -107,8 +131,10 @@ internal sealed class PillButton : Control
     /// <summary>A second, smaller line under the text, e.g. the key that does the same thing.</summary>
     public string Detail { get; set; } = "";
     public string Hint { get; set; } = "";
+    /// <summary>A colour for the words instead of the usual one (not on accent buttons or while on).</summary>
+    public Color? TextColour { get; set; }
     /// <summary>Corner radius in logical pixels.</summary>
-    public float Radius { get; set; } = 7;
+    public float Radius { get; set; } = 10;
     public event Action<string>? HintWanted;
 
     public bool On
@@ -124,6 +150,9 @@ internal sealed class PillButton : Control
         TabStop = true;
         Cursor = Cursors.Hand;
     }
+
+    /// <summary>Acts as if clicked.</summary>
+    public void PerformClick() => OnClick(EventArgs.Empty);
 
     protected override void OnTextChanged(EventArgs e) { base.OnTextChanged(e); Invalidate(); }
     protected override void OnEnabledChanged(EventArgs e) { base.OnEnabledChanged(e); Invalidate(); }
@@ -166,11 +195,11 @@ internal sealed class PillButton : Control
         bool primary = Look == Looks.Accent;
         Color fill = !Enabled ? ground
             : primary ? (_down ? ControlPaint.Dark(Ui.Accent, 0.08f) : _hover ? ControlPaint.Light(Ui.Accent, 0.25f) : Ui.Accent)
-            : _on ? (_hover ? Color.FromArgb(20, 70, 88) : Ui.AccentDeep)
+            : _on ? (_hover ? Color.FromArgb(22, 92, 108) : Ui.AccentDeep)
             : Look == Looks.Ghost ? (_hover ? Ui.Raised : ground)
-            : _down ? Ui.Line : _hover ? Color.FromArgb(30, 40, 60) : Ui.Raised;
-        Color edge = !Enabled ? Ui.Line : _on && !primary ? Ui.Fade(Ui.Accent, 170) : Look == Looks.Ghost ? Ui.Line : Color.Empty;
-        Color ink = !Enabled ? Ui.Faint : primary ? Ui.OnAccent : _on ? Ui.Accent : Ui.Ink;
+            : _down ? Ui.Line : _hover ? Color.FromArgb(42, 52, 128) : Ui.Raised;
+        Color edge = !Enabled ? Ui.Line : _on && !primary ? Ui.Fade(Ui.Accent, 200) : Look == Looks.Ghost ? Ui.Rim : Ui.Fade(Ui.Rim, 140);
+        Color ink = !Enabled ? Ui.Faint : primary ? Ui.OnAccent : _on ? Ui.Accent : TextColour ?? Ui.Ink;
 
         using (GraphicsPath path = Ui.Rounded(r, Radius * d))
         {
@@ -308,7 +337,7 @@ internal sealed class SliderRow : Control
 
         using (Font number = Ui.Mono(10.5f))
         using (var value = new SolidBrush(Enabled ? Ui.Ink : Ui.Faint))
-            g.DrawString(_value.ToString("F" + Decimals) + Unit, number, value, new RectangleF(track.Right + 8 * d, 0, Width - track.Right - 8 * d, Height),
+            g.DrawString((MathF.Abs(_value) < 0.5f * MathF.Pow(10, -Decimals) ? 0f : _value).ToString("F" + Decimals) + Unit, number, value, new RectangleF(track.Right + 8 * d, 0, Width - track.Right - 8 * d, Height),
                 new StringFormat { Alignment = StringAlignment.Far, LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap });
 
         using (var trackBrush = new SolidBrush(Ui.Line)) g.FillRectangle(trackBrush, track);

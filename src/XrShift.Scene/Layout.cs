@@ -60,6 +60,35 @@ public sealed record ScreenSpec
     public int PixelHeight { get; init; }
     /// <summary>For a screen on a virtual monitor: its refresh rate. 0 = the app's choice (60, easy on the graphics card).</summary>
     public int RefreshHz { get; init; }
+    /// <summary>
+    /// Turn about the screen's own upright middle line, degrees: + faces the screen more to the right (its right
+    /// edge further away), as a TV on the left-hand wall looks from where you sit. 0 = facing you. Flat screens only.
+    /// </summary>
+    public float TurnDeg { get; init; }
+    /// <summary>How bright the screen is drawn, 0.2 to 1.</summary>
+    public float Brightness { get; init; } = 1f;
+    /// <summary>The screen stays in the same place in your view when you turn (a heads-up screen), instead of in the room.</summary>
+    public bool FollowsMe { get; init; }
+
+    const float MetresPerInch = 0.0254f;
+
+    /// <summary>The screen's real diagonal, in inches, for a picture of this size: the size of a TV it would match.</summary>
+    public float DiagonalInches(int pictureWidth, int pictureHeight, DisplayOptics optics)
+    {
+        Panel p = ToPanel(pictureWidth, pictureHeight, optics);
+        return MathF.Sqrt(p.Width * p.Width + p.Height * p.Height) / MetresPerInch;
+    }
+
+    /// <summary>The same screen made a given diagonal in inches at its distance.</summary>
+    public ScreenSpec WithDiagonalInches(float inches, int pictureWidth, int pictureHeight, DisplayOptics optics)
+    {
+        float now = DiagonalInches(pictureWidth, pictureHeight, optics);
+        return now <= 0 ? this : this with { Scale = Scale * inches / now };
+    }
+
+    /// <summary>The same screen moved nearer or further, keeping its real size (further away looks smaller).</summary>
+    public ScreenSpec AtDistanceKeepingSize(float metres) =>
+        metres <= 0 ? this : this with { Scale = Scale * Distance / metres, Distance = metres };
 
     public static string DisplaySource(string deviceName) => DisplayPrefix + deviceName;
 
@@ -82,6 +111,7 @@ public sealed record ScreenSpec
             Distance = Distance,
             Width = width,
             Height = width * Math.Max(pictureHeight, 1) / Math.Max(pictureWidth, 1),
+            TurnDeg = CurveDeg < 1f ? TurnDeg : 0,
         };
     }
 
@@ -184,6 +214,8 @@ public sealed record Layout
         PixelWidth = s.PixelWidth is >= 640 and <= 7680 && s.PixelHeight is >= 480 and <= 4320 ? s.PixelWidth : 0,
         PixelHeight = s.PixelWidth is >= 640 and <= 7680 && s.PixelHeight is >= 480 and <= 4320 ? s.PixelHeight : 0,
         RefreshHz = s.RefreshHz is >= 24 and <= 240 ? s.RefreshHz : 0,
+        TurnDeg = Finite(s.TurnDeg, -75, 75, 0),
+        Brightness = Finite(s.Brightness, 0.2f, 1f, 1f),
     };
 
     static float Finite(float value, float min, float max, float fallback) =>

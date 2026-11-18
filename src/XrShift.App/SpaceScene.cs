@@ -35,7 +35,9 @@ internal sealed class SpaceScene : IDisposable
     readonly Dictionary<string, System.Drawing.Size> _captureSizes = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, Rectangle> _captureBounds = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, long> _refused = new(StringComparer.OrdinalIgnoreCase); // source -> when it was last refused
-    readonly SceneItem _ruler, _crosshair, _status, _hands;
+    readonly SceneItem _ruler, _crosshair, _status, _hands, _menu, _edges;
+    string _edgesShown = "";
+    string _menuShown = "";
     HandFrame? _handsShown;
     bool _handsPinch;
     Layout? _layout;
@@ -57,7 +59,8 @@ internal sealed class SpaceScene : IDisposable
             long frames = capture.Frames;
             long before = _framesSeen.GetValueOrDefault(source, frames);
             _framesSeen[source] = frames;
-            rates.Add(((frames - before) / seconds).ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
+            long delta = frames >= before ? frames - before : frames; // a copy started afresh counts from zero
+            rates.Add((delta / seconds).ToString("F0", System.Globalization.CultureInfo.InvariantCulture));
         }
         return $"copies {string.Join(", ", rates)}/s";
     }
@@ -92,6 +95,16 @@ internal sealed class SpaceScene : IDisposable
             _hands = renderer.Add(PanelMesh.HeadLocked(17f, -7.5f, 12f, 9f), handsPicture, headLocked: true);
         _hands.Visible = false;
 
+        // Arrows along the edges of the view pointing to screens that are out of sight, with their names.
+        using (Bitmap edgesPicture = Pictures.Edges([]))
+            _edges = renderer.Add(PanelMesh.HeadLocked(0, 0, 44f, 44f * Pictures.EdgesHeight / Pictures.EdgesWidth), edgesPicture, headLocked: true);
+        _edges.Visible = false;
+
+        // The hand quick menu, in the middle of the view.
+        using (Bitmap menuPicture = Pictures.Menu([], -1))
+            _menu = renderer.Add(PanelMesh.HeadLocked(0, 2f, 36f, 36f * Pictures.MenuHeight / Pictures.MenuWidth), menuPicture, headLocked: true);
+        _menu.Visible = false;
+
         const float statusDegreesWide = 26f;
         using (Bitmap status = Pictures.Status(""))
             _status = renderer.Add(
@@ -109,6 +122,18 @@ internal sealed class SpaceScene : IDisposable
     {
         get => _ruler.Visible;
         set => _ruler.Visible = value;
+    }
+
+    /// <summary>Shows the hand quick menu with one button lit, or hides it (items null). Drawing thread only.</summary>
+    public void SetMenu(IReadOnlyList<string>? items, int highlight)
+    {
+        _menu.Visible = items is not null;
+        if (items is null) return;
+        string key = string.Join("|", items) + "#" + highlight;
+        if (key == _menuShown) return;
+        _menuShown = key;
+        using Bitmap picture = Pictures.Menu(items, highlight);
+        _renderer.SetPicture(_menu, picture);
     }
 
     /// <summary>Shows or hides the hand view and brings it up to date with the latest camera frame. Drawing thread only.</summary>
@@ -270,12 +295,18 @@ internal sealed class SpaceScene : IDisposable
             // they are never used, and skipping them saves the graphics card work on every update.
             bool mips = spec.Scale < 0.95f;
 
+            if (_screens.TryGetValue(spec.Id, out LiveScreen? before) && before.Item.HeadLocked != spec.FollowsMe)
+            {
+                // Following you or staying in the room is decided when the screen is made: make it again.
+                _renderer.Remove(before.Item);
+                _screens.Remove(spec.Id);
+            }
             if (!_screens.TryGetValue(spec.Id, out LiveScreen? screen))
             {
                 screen = new LiveScreen
                 {
                     Spec = spec,
-                    Item = _renderer.Add(PanelMesh.Build(panel), width, height, distance: panel.Distance, mips: mips),
+                    Item = _renderer.Add(PanelMesh.Build(panel), width, height, spec.FollowsMe, panel.Distance, mips),
                     Panel = panel,
                 };
                 _screens[spec.Id] = screen;
@@ -314,16 +345,22 @@ internal sealed class SpaceScene : IDisposable
     /// black), and with <paramref name="dim"/> darkens the screens the wearer is not looking at, fading over
     /// about a tenth of a second so the change is not a flicker at the edges.
     /// </summary>
-    public void Look(System.Numerics.Quaternion head, bool dim, bool blank, float seconds)
+    public void Look(System.Numerics.Quaternion head, bool dim, bool blank, float seconds, float easyReading = 0)
     {
         _blank = blank;
+        foreach (LiveScreen screen in _screens.Values)
+        {
+            // Reading without glasses: sharper edges and a little more contrast on every screen.
+            screen.Item.Sharpen = easyReading * 1.4f;
+            screen.Item.Contrast = 1f + easyReading * 0.3f;
+        }
         System.Numerics.Vector3 gaze = System.Numerics.Vector3.Transform(-System.Numerics.Vector3.UnitZ, head);
         LiveScreen? looked = null;
         if (dim)
         {
             foreach (LiveScreen screen in _screens.Values)
             {
-                if (!screen.Shown || screen.Panel is not { } panel || !panel.TryHit(gaze, out float s, out float t)) continue;
+                if (!screen.Shown || screen.Spec.FollowsMe || screen.Panel is not { } panel || !panel.TryHit(gaze, out float s, out float t)) continue;
                 if (MathF.Abs(s) > 0.5f || MathF.Abs(t) > 0.5f) continue;
                 if (looked is null || panel.Distance < looked.Panel!.Distance) looked = screen;
             }
@@ -332,9 +369,38 @@ internal sealed class SpaceScene : IDisposable
         foreach (LiveScreen screen in _screens.Values)
         {
             screen.Item.Visible = screen.Shown && !blank;
-            float target = !dim || looked is null || screen == looked ? 1f : DimTo;
+            float target = (!dim || looked is null || screen == looked || screen.Spec.FollowsMe ? 1f : DimTo) * screen.Spec.Brightness;
             screen.Item.Tint += (target - screen.Item.Tint) * step;
         }
+    }
+
+    /// <summary>
+    /// Points the edge arrows at every shown room screen that is out of sight from this head direction. Drawing
+    /// thread only; the picture is only redrawn when an arrow moves by more than a few degrees.
+    /// </summary>
+    public void PointToHiddenScreens(System.Numerics.Quaternion head, DisplayOptics optics, bool show)
+    {
+        var hints = new List<(float AngleDeg, string Name)>();
+        if (show && !_blank)
+        {
+            var toView = System.Numerics.Quaternion.Conjugate(head);
+            float halfX = optics.HorizontalFovDeg / 2f, halfY = optics.VerticalFovDeg / 2f;
+            foreach (LiveScreen screen in _screens.Values)
+            {
+                if (!screen.Shown || screen.Spec.FollowsMe || screen.Panel is not { } panel) continue;
+                System.Numerics.Vector3 v = System.Numerics.Vector3.Transform(panel.Centre, toView);
+                float across = MathF.Atan2(v.X, -v.Z) * 180f / MathF.PI, up = MathF.Atan2(v.Y, MathF.Sqrt(v.X * v.X + v.Z * v.Z)) * 180f / MathF.PI;
+                float halfW = panel.AngularWidthDeg / 2f;
+                if (MathF.Abs(across) < halfX + halfW * 0.5f && MathF.Abs(up) < halfY) continue; // at least half in view
+                hints.Add((MathF.Atan2(up, across) * 180f / MathF.PI, screen.Spec.Name));
+            }
+        }
+        _edges.Visible = hints.Count > 0;
+        string key = string.Join("|", hints.Select(h => $"{MathF.Round(h.AngleDeg / 8f)}:{h.Name}"));
+        if (key == _edgesShown) return;
+        _edgesShown = key;
+        using Bitmap picture = Pictures.Edges(hints);
+        _renderer.SetPicture(_edges, picture);
     }
 
     /// <summary>How bright a screen not looked at is, with dimming on.</summary>

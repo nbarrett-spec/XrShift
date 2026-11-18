@@ -54,6 +54,16 @@ internal sealed record ViewSettings
     public const float MinZoom = 0.5f, MaxZoom = 1.6f;
     /// <summary>Screens the wearer is not looking at are shown darker.</summary>
     public bool Dim { get; init; }
+    /// <summary>
+    /// Stationary mode: how wide the picture the glasses hold still is, in degrees. It matches the screen size set
+    /// in the glasses' own menu; bigger leaves room for screens further to the sides, at the cost of sharpness.
+    /// </summary>
+    public float HeldFovDeg { get; init; } = DisplayOptics.OnePro.HorizontalFovDeg;
+    /// <summary>Arrows at the edges of the view point the way to screens that are out of sight.</summary>
+    public bool EdgeArrows { get; init; } = true;
+    /// <summary>Reading without glasses or contacts: 0 = off, 1 = strongest sharpening and contrast.</summary>
+    public float EasyReading { get; init; }
+    public const float MinHeldFovDeg = 30, MaxHeldFovDeg = 150;
 
     public static ViewSettings Default { get; } = new();
 
@@ -77,14 +87,14 @@ internal sealed record ViewSettings
     }
 
     public string ToText() => string.Create(CultureInfo.InvariantCulture,
-        $"delay={DelayMs:F1};fov={FovDeg:F2};level={LevelDeg:F2};roll={RollDeg:F2};ruler={(Ruler ? 1 : 0)};look={(LookPointer ? (LookFollow ? 2 : 1) : 0)};focus={(LookFocus ? 1 : 0)};zoom={Zoom:F2};dim={(Dim ? 1 : 0)};drift={(Follow ? 1 : 0)};break={BreakMinutes};hands={(Hands ? 1 : 0)}");
+        $"delay={DelayMs:F1};fov={FovDeg:F2};level={LevelDeg:F2};roll={RollDeg:F2};ruler={(Ruler ? 1 : 0)};look={(LookPointer ? (LookFollow ? 2 : 1) : 0)};focus={(LookFocus ? 1 : 0)};zoom={Zoom:F2};dim={(Dim ? 1 : 0)};drift={(Follow ? 1 : 0)};break={BreakMinutes};hands={(Hands ? 1 : 0)};held={HeldFovDeg:F1};arrows={(EdgeArrows ? 1 : 0)};easy={EasyReading:F2}");
 
     /// <summary>Reads the saved text. Settings added in later versions may be missing; the two original ones may not.</summary>
     public static bool TryParse(string text, out ViewSettings settings)
     {
         settings = Default;
         float? delay = null, fov = null;
-        float level = 0, roll = 0, ruler = 0, look = 0, focus = 0, zoom = 1, dimmed = 0, drift = 0, rest = 0, hands = 0;
+        float level = 0, roll = 0, ruler = 0, look = 0, focus = 0, zoom = 1, dimmed = 0, drift = 0, rest = 0, hands = 0, held = DisplayOptics.OnePro.HorizontalFovDeg, arrows = 1, easy = 0;
         foreach (string part in text.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             string[] kv = part.Split('=');
@@ -104,6 +114,9 @@ internal sealed record ViewSettings
                 case "drift": drift = value; break;
                 case "break": rest = value; break;
                 case "hands": hands = value; break;
+                case "held": held = value; break;
+                case "arrows": arrows = value; break;
+                case "easy": easy = value; break;
                 default: return false;
             }
         }
@@ -124,6 +137,9 @@ internal sealed record ViewSettings
             LookFocus = focus != 0,
             Zoom = Math.Clamp(zoom, MinZoom, MaxZoom),
             Dim = dimmed != 0,
+            HeldFovDeg = Math.Clamp(held, MinHeldFovDeg, MaxHeldFovDeg),
+            EdgeArrows = arrows != 0,
+            EasyReading = Math.Clamp(easy, 0f, 1f),
         };
         return true;
     }
@@ -167,7 +183,10 @@ internal static class LayoutStore
         foreach (DisplayInfo display in sources.OrderByDescending(d => d.Primary))
         {
             if (layout.Shows(display.Id)) continue;
-            string name = display.MonitorNames.Length > 0 ? display.MonitorNames[0] : $"Monitor {layout.Screens.Count + 1}";
+            // Friendly names: people know "Laptop screen", not the panel's model number.
+            string name = display.Primary && !display.IsGlasses ? "Laptop screen"
+                : VirtualMonitors.IsVirtual(display) ? $"Extra monitor {layout.Screens.Count(s => VirtualMonitors.IsVirtualId(s.DisplayName)) + 1}"
+                : display.MonitorNames.Length > 0 ? display.MonitorNames[0] : $"Monitor {layout.Screens.Count + 1}";
             layout = layout.Add(layout.PlaceNew(name, ScreenSpec.DisplaySource(display.Id), display.Bounds.Width, display.Bounds.Height, optics));
         }
         return layout;

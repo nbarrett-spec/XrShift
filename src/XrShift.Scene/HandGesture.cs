@@ -17,9 +17,9 @@ public readonly record struct HandAction(Vector2 Move, bool? Press);
 public sealed class HandGesture
 {
     /// <summary>Thumb tip to index tip, as a share of the hand's size, below which the hand counts as pinching.</summary>
-    public float PinchAt { get; init; } = 0.30f;
+    public float PinchAt { get; init; } = 0.32f;
     /// <summary>...and above which it counts as open again.</summary>
-    public float ReleaseAt { get; init; } = 0.45f;
+    public float ReleaseAt { get; init; } = 0.50f;
     /// <summary>Palm movements smaller than this (picture widths) are tracking jitter and are ignored.</summary>
     public float Deadband { get; init; } = 0.0015f;
     /// <summary>A jump bigger than this between frames is a hand found again somewhere else, not a movement.</summary>
@@ -53,8 +53,14 @@ public sealed class HandGesture
         Vector2 move = Vector2.Zero;
         if (_palm is { } before)
         {
-            // Lightly smoothed, so a still hand gives a still pointer.
-            Vector2 smoothed = Vector2.Lerp(before, palm, 0.6f);
+            // A "one euro" filter: heavy smoothing while the hand is nearly still (no jitter), light while it moves
+            // (no lag). The camera gives about 15 frames a second.
+            const float FrameSeconds = 1f / 15f, MinCutoffHz = 1.0f, SpeedGain = 2.0f;
+            float speed = Vector2.Distance(before, palm) / FrameSeconds;
+            float cutoff = MinCutoffHz + SpeedGain * speed;
+            float tau = 1f / (2f * MathF.PI * cutoff);
+            float alpha = 1f / (1f + tau / FrameSeconds);
+            Vector2 smoothed = Vector2.Lerp(before, palm, alpha);
             Vector2 step = smoothed - before;
             if (step.Length() > MaxStep) { _palm = palm; return new HandAction(Vector2.Zero, press); }
             if (step.Length() >= Deadband) { move = step; _palm = smoothed; }

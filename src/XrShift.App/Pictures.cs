@@ -13,6 +13,95 @@ internal static class Pictures
     public const int RulerWidth = 8192, RulerHeight = 128;
 
     public const int HandsWidth = 320, HandsHeight = 240;
+    public const int MenuWidth = 1400, MenuHeight = 200;
+    public const int EdgesWidth = 1280, EdgesHeight = 720;
+
+    /// <summary>
+    /// Arrows just inside the edges of the view, each pointing the way to a screen that is out of sight, with its
+    /// name. Black is see-through in the glasses. Angles: 0 = right, 90 = up.
+    /// </summary>
+    public static Bitmap Edges(IReadOnlyList<(float AngleDeg, string Name)> hints)
+    {
+        Bitmap picture = NewPicture(EdgesWidth, EdgesHeight, out Graphics g);
+        using (g)
+        {
+            g.Clear(Color.Transparent); // only the arrows are drawn: screens behind stay visible
+            var accent = Color.FromArgb(94, 234, 212);
+            using var font = new Font("Bahnschrift", 24f, FontStyle.Regular, GraphicsUnit.Pixel);
+            using var fill = new SolidBrush(accent);
+            using var ink = new SolidBrush(Color.FromArgb(225, 232, 255));
+            var centred = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            float cx = EdgesWidth / 2f, cy = EdgesHeight / 2f, rx = cx - 70, ry = cy - 60;
+            var labels = new List<RectangleF>(); // names already written, so two never overlap
+            var arrows = new List<PointF>();     // arrow tips already drawn
+            foreach ((float angle, string name) in hints.OrderBy(h => h.AngleDeg))
+            {
+                float a = angle * MathF.PI / 180f;
+                float dx = MathF.Cos(a), dy = -MathF.Sin(a);
+                // Where the line from the middle in that direction meets an ellipse just inside the edge.
+                float k = 1f / MathF.Sqrt(dx * dx / (rx * rx) + dy * dy / (ry * ry));
+                var tip = new PointF(cx + dx * k, cy + dy * k);
+                var back = new PointF(tip.X - dx * 34, tip.Y - dy * 34);
+                var side = new PointF(-dy * 18, dx * 18);
+                var label = new PointF(tip.X - dx * 150, tip.Y - dy * 58);
+                SizeF size = g.MeasureString(name, font);
+                var box = new RectangleF(label.X - size.Width / 2 - 6, label.Y - 18, size.Width + 12, 36);
+                while (labels.Any(l => l.IntersectsWith(box))) box.Offset(0, 36);
+                labels.Add(box);
+                g.DrawString(name, font, ink, box, centred);
+                // Two screens the same way share one arrow.
+                if (arrows.Any(a2 => MathF.Abs(a2.X - tip.X) + MathF.Abs(a2.Y - tip.Y) < 50)) continue;
+                arrows.Add(tip);
+                g.FillPolygon(fill, [tip, new PointF(back.X + side.X, back.Y + side.Y), new PointF(back.X - side.X, back.Y - side.Y)]);
+            }
+        }
+        return picture;
+    }
+
+    /// <summary>
+    /// The hand quick menu: a row of big rounded buttons on black (see-through in the glasses), the lit one filled
+    /// with the accent colour, and a line underneath saying how to use it.
+    /// </summary>
+    public static Bitmap Menu(IReadOnlyList<string> items, int highlight)
+    {
+        Bitmap picture = NewPicture(MenuWidth, MenuHeight, out Graphics g);
+        using (g)
+        {
+            g.Clear(Color.Transparent); // the buttons sit over the screens without blacking them out
+            var accent = Color.FromArgb(107, 228, 255);
+            int n = Math.Max(items.Count, 1), gap = 18;
+            float w = (MenuWidth - gap * (n + 1)) / (float)n, h = 118;
+            using var face = new Font("Bahnschrift", 30f, FontStyle.Regular, GraphicsUnit.Pixel);
+            using var hintFace = new Font("Bahnschrift", 22f, FontStyle.Regular, GraphicsUnit.Pixel);
+            var centred = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center };
+            for (int i = 0; i < items.Count; i++)
+            {
+                var box = new RectangleF(gap + i * (w + gap), 10, w, h);
+                using GraphicsPath shape = Rounded(box, 28);
+                bool lit = i == highlight;
+                using (var fill = new SolidBrush(lit ? accent : Color.FromArgb(34, 46, 66))) g.FillPath(fill, shape);
+                using (var edge = new Pen(lit ? Color.White : Color.FromArgb(90, 120, 150), lit ? 3 : 2)) g.DrawPath(edge, shape);
+                using var ink = new SolidBrush(lit ? Color.FromArgb(3, 20, 28) : Ink);
+                g.DrawString(items[i], face, ink, box, centred);
+            }
+            using var hint = new SolidBrush(Color.FromArgb(170, 190, 210));
+            g.DrawString("move your hand to choose  ·  pinch to pick  ·  make a fist to close", hintFace, hint,
+                new RectangleF(0, 140, MenuWidth, 50), centred);
+        }
+        return picture;
+    }
+
+    static GraphicsPath Rounded(RectangleF r, float radius)
+    {
+        var path = new GraphicsPath();
+        float d = radius * 2;
+        path.AddArc(r.X, r.Y, d, d, 180, 90);
+        path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+        path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+        path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+        path.CloseFigure();
+        return path;
+    }
 
     static readonly (int A, int B)[] HandLines =
     [

@@ -85,4 +85,40 @@ public class PresetTests
         List<float> yaws = fitted.Screens.Where(s => s.Visible).Select(s => s.YawDeg).ToList();
         Assert.Equal(yaws.OrderByDescending(y => y), yaws);
     }
+
+    [Fact]
+    public void CinemaShowsOneBigCurvedScreenAheadAndHidesTheRest()
+    {
+        Layout cinema = Presets.Arrange(Three(), Arrangement.Cinema, Hd, Optics, mainId: "b");
+        ScreenSpec main = cinema.Find("b")!;
+        Assert.True(main.Visible && main.YawDeg == 0 && main.CurveDeg > 0);
+        Assert.False(cinema.Find("a")!.Visible);
+        Assert.False(cinema.Find("c")!.Visible);
+    }
+
+    [Fact]
+    public void ATvSizeInInchesComesOutAsAsked()
+    {
+        var tv = new ScreenSpec { Distance = 2.5f }.WithDiagonalInches(55, 1920, 1080, Optics);
+        Assert.InRange(tv.DiagonalInches(1920, 1080, Optics), 54.9f, 55.1f);
+        // Moving it further keeps its real size.
+        ScreenSpec further = tv.AtDistanceKeepingSize(4f);
+        Assert.InRange(further.DiagonalInches(1920, 1080, Optics), 54.9f, 55.1f);
+        Assert.True(further.Scale < tv.Scale);
+    }
+
+    [Fact]
+    public void ATurnedScreenIsStillHitWhereItIsDrawn()
+    {
+        var panel = new Panel { Distance = 2, Width = 1.6f, Height = 0.9f, TurnDeg = 40 };
+        foreach ((float s, float t) in new[] { (0f, 0f), (0.3f, 0.2f), (-0.4f, -0.3f) })
+        {
+            System.Numerics.Vector3 point = panel.LocalPoint(s, t);
+            Assert.True(panel.TryHit(System.Numerics.Vector3.Normalize(point), out float hs, out float ht));
+            Assert.InRange(hs, s - 1e-3f, s + 1e-3f);
+            Assert.InRange(ht, t - 1e-3f, t + 1e-3f);
+        }
+        // Turned +40: the right edge is further away than the left.
+        Assert.True(panel.LocalPoint(0.5f, 0).Z < panel.LocalPoint(-0.5f, 0).Z);
+    }
 }

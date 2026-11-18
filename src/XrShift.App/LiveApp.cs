@@ -28,6 +28,11 @@ internal static class LiveApp
         public volatile bool PreviewWanted;
         /// <summary>The latest such picture, handed from the drawing thread to the window thread.</summary>
         public Bitmap? Preview;
+        /// <summary>Stationary mode: the room direction (degrees, yaw + = left, pitch + = up) the glasses' held picture faces.</summary>
+        public volatile float HeldYaw, HeldPitch;
+        /// <summary>The hand quick menu's buttons while it is open (null when closed), and the lit one.</summary>
+        public volatile string[]? MenuItems;
+        public volatile int MenuHighlight;
         /// <summary>Pictures per second from each copied screen, measured on the drawing thread.</summary>
         public volatile string CaptureRates = "";
     }
@@ -325,15 +330,21 @@ internal static class LiveApp
         // Stationary: the glasses are in their own stationary (Anchor) mode and hold their picture still in the room;
         // XrShift then keeps its head still and shows a separate set of profiles, arranged to fit in that picture.
         bool stationary = false;
+        string linedUpFor = ""; // the set of monitors last lined up on the desktop (LineUpDesktops)
         Func<bool> layoutEmpty = () => true;
+        // In stationary mode the picture the glasses hold still can be set larger than their view in the glasses'
+        // own menu; the scene is then drawn for that angle, so a screen's place in degrees is its real direction.
+        DisplayOptics OpticsFor(ViewSettings v) => stationary ? DisplayOptics.OnePro with { HorizontalFovDeg = v.HeldFovDeg } : OpticsOf(v);
         IReadOnlyList<DisplayInfo> AutoAddable() =>
             stationary
-                ? (layoutEmpty() ? sources.Where(d => d.Primary).Take(1).ToList() : [])
-                : sources.Where(d => !manageMonitors || adding || !VirtualMonitors.IsVirtual(d)).ToList();
+                // Stationary starts with the main screen only; a monitor the wearer has just added joins it too.
+                ? (layoutEmpty() ? sources.Where(d => d.Primary).Take(1).ToList() : sources.Where(VirtualMonitors.IsVirtual).ToList())
+                // Every extra monitor that exists gets a screen, so none sits on the desktop unseen.
+                : sources.ToList();
 
         Workspace workspace = LayoutStore.Load() ?? new Workspace();
         layoutEmpty = () => workspace.Current.Layout.Screens.Count == 0;
-        Layout layout = LayoutStore.WithScreensFor(workspace.Current.Layout, AutoAddable(), OpticsOf(view));
+        Layout layout = LayoutStore.WithScreensFor(workspace.Current.Layout, AutoAddable(), OpticsFor(view));
         bool statusPinned = false, gameMode = false;
         bool dirty = !ReferenceEquals(layout, workspace.Current.Layout);
         workspace = workspace.WithLayout(layout);
@@ -486,7 +497,7 @@ internal static class LiveApp
         {
             if (ReferenceEquals(changed, workspace)) return;
             workspace = changed;
-            layout = LayoutStore.WithScreensFor(workspace.Current.Layout, AutoAddable(), OpticsOf(view));
+            layout = LayoutStore.WithScreensFor(workspace.Current.Layout, AutoAddable(), OpticsFor(view));
             workspace = workspace.WithLayout(layout);
             ShowProfiles();
             settings.SetLayout(layout, sources);
@@ -548,6 +559,7 @@ internal static class LiveApp
 
         // Game mode: the app steps aside so the glasses show their own Windows desktop at full speed.
         Action planCursor = () => { };
+        Action<bool> pauseGlassesLinks = _ => { }; // plain screen: no camera listening, no requests to the glasses
         // Before the driver rebuilds or removes its monitors, the scene lets go of its live copies of them, and
         // only then are the monitors touched. Tearing monitors down while they were still being copied is what
         // froze the PC once on quitting (2026-11-17); the same order is kept for every change of their number.
@@ -574,6 +586,7 @@ internal static class LiveApp
             }
             if (on) LetGoOfVirtualCopies();
             gameMode = on;
+            pauseGlassesLinks(on);
             presenter.Paused = on;
             if (on)
             {
@@ -609,6 +622,7 @@ internal static class LiveApp
             if (on)
             {
                 string? why = direct ? "VR mode needs the glasses on the Windows desktop (direct mode is on)."
+                    : stationary ? "Switch the glasses to Follow with their button first. In stationary mode they hold one picture still, so a VR game could not follow your head."
                     : !VrBridge.DriverPresent ? "The VR driver is not part of this copy of XrShift yet."
                     : VrBridge.SteamVrFolder() is null ? "SteamVR is not installed. Install it from Steam, then try again." : null;
                 if (why is null)
@@ -627,6 +641,7 @@ internal static class LiveApp
                     return;
                 }
                 vrMode = true;
+                settings.Hide(); // nothing of XrShift's should hold the keyboard or the controller during a game
             }
             else
             {
@@ -637,6 +652,31 @@ internal static class LiveApp
             settings.SetVrMode(vrMode);
         }
         settings.VrModeChanged += SetVrMode;
+
+        // In VR mode SteamVR's own windows (its compositor, Room Setup, its status window) can take the focus, and
+        // Steam only passes a controller to the program that has it: the game then stops answering the gamepad.
+        // While one of them has held the focus for a moment, it is handed back to the program that had it last.
+        string[] steamVrPrograms = ["vrcompositor", "vrmonitor", "vrserver", "vrwebhelper", "vrdashboard", "steamvr_room_setup", "vrstartup"];
+        string[] neverAGame = ["XrShift", "explorer", "steam", "steamwebhelper", "ShellExperienceHost", "SearchHost", "StartMenuExperienceHost", "TextInputHost"];
+        double stolenSince = -1;
+        var vrFocusTimer = new System.Windows.Forms.Timer(parts) { Interval = 500 };
+        vrFocusTimer.Tick += (_, _) =>
+        {
+            if (!vrMode) { stolenSince = -1; return; }
+            string? owner = WindowFinder.ProgramOfWindow(WindowFinder.Foreground());
+            bool stolen = owner is not null && steamVrPrograms.Contains(owner, StringComparer.OrdinalIgnoreCase);
+            double time = clock.Elapsed.TotalSeconds;
+            if (!stolen) { stolenSince = -1; return; }
+            if (stolenSince < 0) { stolenSince = time; return; }
+            if (time - stolenSince < 1.5) return;
+            stolenSince = -1;
+            WindowInfo? game = WindowFinder.List().FirstOrDefault(w =>
+                !steamVrPrograms.Contains(w.Program, StringComparer.OrdinalIgnoreCase) && !neverAGame.Contains(w.Program, StringComparer.OrdinalIgnoreCase));
+            if (game is null) return;
+            WindowFinder.Activate(game.Handle);
+            Log.Line($"VR mode: {owner} had the focus; gave it back to {game.Program} so the controller reaches the game.");
+        };
+        vrFocusTimer.Start();
         setGameMode = SetGameMode;
 
         // ---- virtual monitors: real extra desktops made by the Virtual Display Driver ------------------------
@@ -646,9 +686,10 @@ internal static class LiveApp
             settings.CanAddMonitors = count is not null;
             settings.SetVirtualNote(count switch
             {
-                null => "No virtual monitor driver",
-                1 => "1 virtual monitor",
-                _ => $"{count} virtual monitors",
+                null => "+ Monitor sets up extra monitors",
+                0 => "",
+                1 => "1 extra monitor",
+                _ => $"{count} extra monitors",
             });
         }
         ShowVirtual();
@@ -687,10 +728,15 @@ internal static class LiveApp
         {
             if (!manageMonitors || gameMode || !VirtualMonitors.Installed) return;
             int needed = VirtualMonitors.Needed(layout), have = VirtualMonitors.Count() ?? 0;
+            // Switching between stationary and follow never takes monitors away: the windows on them would be
+            // thrown back onto the laptop screen. Only fewer screens needed at start, or a removal, reduces them.
+            if (why.EndsWith(" mode", StringComparison.Ordinal) && needed < have) return;
             if (needed != have) SetVirtualCount(needed, why);
         }
         matchVirtual = MatchVirtualCount;
         MatchVirtualCount("Start");
+        Func<Layout, Layout, Layout> placeNewAtGaze = (_, after) => after;
+        Action putSelectedHere = () => { };
         settings.WindowPinRequested += window =>
         {
             string source = ScreenSpec.WindowSource(window.Program, window.Title);
@@ -700,8 +746,9 @@ internal static class LiveApp
                 return;
             }
             WindowFinder.Restore(window.Handle); // Windows does not draw a minimised window, so there would be nothing to show
-            ScreenSpec spec = layout.PlaceNew(WindowFinder.FriendlyName(window.Program), source, window.Width, window.Height, OpticsOf(view));
-            layout = layout.Add(spec);
+            ScreenSpec spec = layout.PlaceNew(WindowFinder.FriendlyName(window.Program), source, window.Width, window.Height, OpticsFor(view));
+            Layout beforePin = layout;
+            layout = placeNewAtGaze(beforePin, layout.Add(spec));
             workspace = workspace.WithLayout(layout);
             pinned = new Dictionary<string, IntPtr>(pinned, StringComparer.OrdinalIgnoreCase) { [source] = window.Handle };
             settings.SetLayout(layout, sources);
@@ -726,14 +773,14 @@ internal static class LiveApp
             Quaternion trim = Quaternion.CreateFromYawPitchRoll(0, -view.LevelDeg * DegToRad, view.RollDeg * DegToRad);
             Quaternion drift = Quaternion.CreateFromAxisAngle(Vector3.UnitY, -shared.FollowYaw);
             Vector3 gaze = Vector3.Transform(-Vector3.UnitZ, drift * tracker.GetPose().Orientation * trim);
-            DisplayOptics optics = OpticsOf(view);
+            DisplayOptics optics = OpticsFor(view);
 
             (string, Point, Rectangle, IntPtr, float)? best = null;
             float bestMiss = float.MaxValue, bestDistance = float.MaxValue;
             if (blank) return null;
             foreach (ScreenSpec spec in layout.Zoomed(view.Zoom).Screens)
             {
-                if (!spec.Visible) continue;
+                if (!spec.Visible || spec.FollowsMe) continue;
                 Rectangle on; // where this screen's picture lives on the real desktop
                 IntPtr handle = IntPtr.Zero;
                 if (spec.DisplayName is { } id)
@@ -815,6 +862,14 @@ internal static class LiveApp
             if (now != pointerSeen && now != pointerPlaced) handMovedAt = time;
             pointerSeen = now;
 
+            // A game that has taken the mouse (pointer hidden while you play) is left alone: moving the pointer would
+            // turn its camera. Look-to-point carries on as soon as the pointer shows again (a menu, a pause, Alt+Tab).
+            if (WindowFinder.MouseTakenByProgram())
+            {
+                gazeOn = null;
+                handAnchor = null;
+                return;
+            }
             if (!view.LookPointer || gameMode || blank || shared.HoldHead)
             {
                 gazeOn = focusedOn = null;
@@ -900,6 +955,7 @@ internal static class LiveApp
 
         void PickUpOrSetDown()
         {
+            if (stationary) { putSelectedHere(); return; } // stationary: Ctrl+Alt+P puts a screen where you look
             if (carried is not null) { SetDown(); return; }
             if (blank) return;
             if (GazeAngles() is not { } at || FindGaze() is not { Miss: < 0.25f } hit || layout.Find(hit.Id) is not { } spec)
@@ -944,6 +1000,11 @@ internal static class LiveApp
             if (gesture.Pinching) HandInput.MouseButton(false);
             gesture = new HandGesture();
         }
+        // The hand quick menu: hold a flat hand up, palm out, still for a moment.
+        string[] MenuChoices = ["Hide all", "Recentre", "Put here", "Next profile", "Close"];
+        var handMenu = new HandMenu(MenuChoices.Length);
+        bool swallowRelease = false;
+        Action<int> menuPick = _ => { };
         var handTimer = new System.Windows.Forms.Timer(parts) { Interval = 15 };
         handTimer.Tick += (_, _) =>
         {
@@ -959,6 +1020,8 @@ internal static class LiveApp
             if (!live)
             {
                 LetGo();
+                handMenu.Close();
+                shared.MenuItems = null;
                 shared.HandsPinching = false;
                 shared.HandsFrame = hands.Latest;
                 return;
@@ -969,6 +1032,21 @@ internal static class LiveApp
             shared.HandsFrame = frame;
             TrackedHand? hand = frame.Hands.OrderByDescending(h => h.Score).FirstOrDefault();
             HandAction action = gesture.Step(hand?.Points);
+
+            // The quick menu takes the hand while it is open: no pointer moves, no clicks reach Windows.
+            bool menuWasOpen = handMenu.IsOpen;
+            int? picked = handMenu.Step(hand?.Points, clock.Elapsed.TotalSeconds, action.Press == true);
+            if (handMenu.IsOpen || menuWasOpen || picked is not null)
+            {
+                if (action.Press == true) swallowRelease = true;
+                shared.MenuItems = handMenu.IsOpen ? MenuChoices : null;
+                shared.MenuHighlight = handMenu.Highlight;
+                shared.HandsPinching = gesture.Pinching;
+                if (picked is { } choice) menuPick(choice);
+                if (handMenu.IsOpen && !menuWasOpen) Log.Line("Hand quick menu opened.");
+                return;
+            }
+            if (action.Press == false && swallowRelease) { swallowRelease = false; action = action with { Press = null }; }
             if (action.Move != Vector2.Zero)
             {
                 // y runs over the picture's height, x over its width: the same distance in the room moves the same.
@@ -1011,6 +1089,95 @@ internal static class LiveApp
         // ---- stationary and follow: the glasses' own two modes ---------------------------------------
         using var camera = new GlassesCamera();
         if (live) camera.Start();
+        using var glassesControl = new GlassesControl();
+        if (live) glassesControl.Start();
+        pauseGlassesLinks = on => { glassesControl.Paused = on; camera.Paused = on; };
+
+        // Stationary mode, screens all around the room. The glasses can hold only one picture still, but they glide
+        // it to wherever you look when asked (their recentre). So XrShift keeps its own map of where every screen is
+        // in the room, follows your head with the motion sensor, and when you turn to look at a screen outside the
+        // held picture and keep your head still for a moment, asks the glasses to glide the picture there and draws
+        // that part of the room into it. Each screen is then held still by the glasses themselves while you use it.
+        (float Yaw, float Pitch) HeadDirection()
+        {
+            Quaternion trim = Quaternion.CreateFromYawPitchRoll(0, -view.LevelDeg * DegToRad, view.RollDeg * DegToRad);
+            Vector3 g = Vector3.Normalize(Vector3.Transform(-Vector3.UnitZ, tracker.GetPose().Orientation * trim));
+            return (MathF.Atan2(-g.X, -g.Z) / DegToRad, MathF.Asin(Math.Clamp(g.Y, -1f, 1f)) / DegToRad);
+        }
+        static float Apart(float yawA, float pitchA, float yawB, float pitchB)
+        {
+            float dy = MathF.IEEERemainder(yawA - yawB, 360f);
+            return MathF.Sqrt(dy * dy + (pitchA - pitchB) * (pitchA - pitchB));
+        }
+        void HoldPictureHere()
+        {
+            if (!tracker.HasPose) return;
+            (float yaw, float pitch) = HeadDirection();
+            shared.HeldYaw = yaw;
+            shared.HeldPitch = pitch;
+            glassesControl.RecentreHeldPicture();
+        }
+        (float Yaw, float Pitch) steadyFrom = (0, 0);
+        double steadySince = 0;
+        var roomTimer = new System.Windows.Forms.Timer(parts) { Interval = 50 };
+        roomTimer.Tick += (_, _) =>
+        {
+            if (!stationary || gameMode || blank || !tracker.HasPose) return;
+            double time = clock.Elapsed.TotalSeconds;
+            (float yaw, float pitch) = HeadDirection();
+            if (Apart(yaw, pitch, steadyFrom.Yaw, steadyFrom.Pitch) > 4f) { steadyFrom = (yaw, pitch); steadySince = time; return; }
+            if (time - steadySince < 0.2) return; // still turning
+
+            // Resting on a screen that the held picture does not show well? An empty wall is left alone.
+            DisplayOptics held = DisplayOptics.OnePro with { HorizontalFovDeg = view.HeldFovDeg };
+            float half = held.HorizontalFovDeg / 2f;
+            var gaze = Vector3.Transform(-Vector3.UnitZ, Quaternion.CreateFromYawPitchRoll(yaw * DegToRad, pitch * DegToRad, 0));
+            ScreenSpec? target = layout.Screens.FirstOrDefault(s =>
+            {
+                if (!s.Visible || s.FollowsMe) return false;
+                (int w, int h) = PictureSize(s);
+                return s.ToPanel(w, h, held).TryHit(gaze, out float hs, out float ht) && MathF.Abs(hs) <= 0.55f && MathF.Abs(ht) <= 0.6f;
+            });
+            if (target is null) return;
+            if (Apart(target.YawDeg, target.PitchDeg, shared.HeldYaw, shared.HeldPitch) < half * 0.6f) return; // already well in view
+            HoldPictureHere();
+            Log.Line($"Stationary: glided the held picture to yaw {yaw:F0}, pitch {pitch:F0}.");
+        };
+        roomTimer.Start();
+
+        // In stationary mode a new screen appears where you are looking, not beside the last one; and a screen can be
+        // sent to where you look (Ctrl+Alt+P, or the button on the Stationary page).
+        placeNewAtGaze = (before, after) =>
+        {
+            if (!stationary || !tracker.HasPose) return after;
+            List<ScreenSpec> fresh = after.Screens.Where(s => before.Find(s.Id) is null).ToList();
+            if (fresh.Count == 0) return after;
+            (float yaw, float pitch) = HeadDirection();
+            float apart = 0;
+            foreach (ScreenSpec s in fresh)
+            {
+                after = after.With(Layout.Clamp(s with { YawDeg = MathF.IEEERemainder(yaw - apart, 360f), PitchDeg = pitch }));
+                apart += 35;
+            }
+            HoldPictureHere();
+            return after;
+        };
+        putSelectedHere = () =>
+        {
+            if (!stationary || !tracker.HasPose) return;
+            ScreenSpec? spec = settings.SelectedId is { } id ? layout.Find(id) : null;
+            spec ??= layout.Screens.LastOrDefault(s => s.Visible);
+            if (spec is null) return;
+            (float yaw, float pitch) = HeadDirection();
+            layout = layout.With(Layout.Clamp(spec with { YawDeg = yaw, PitchDeg = pitch }));
+            workspace = workspace.WithLayout(layout);
+            settings.SetLayout(layout, sources);
+            Touch();
+            HoldPictureHere();
+            Notice($"{spec.Name} is now where you look", 2);
+            Log.Line($"Stationary: put '{spec.Name}' at yaw {yaw:F0}, pitch {pitch:F0}.");
+        };
+        settings.PutHereRequested += () => putSelectedHere();
         (int Width, int Height) PictureSize(ScreenSpec s)
         {
             if (s.DisplayName is { } id && sources.FirstOrDefault(d => string.Equals(d.Id, id, StringComparison.OrdinalIgnoreCase)) is { } d)
@@ -1021,7 +1188,7 @@ internal static class LiveApp
         }
         void FitInView()
         {
-            layout = Presets.FitInView(layout, PictureSize, OpticsOf(view));
+            layout = Presets.FitInView(layout, PictureSize, OpticsFor(view));
             workspace = workspace.WithLayout(layout);
             settings.SetLayout(layout, sources);
             Touch();
@@ -1030,13 +1197,14 @@ internal static class LiveApp
         void SwitchMode(bool toStationary)
         {
             if (carried is not null) SetDown();
+            if (toStationary) HoldPictureHere();
             dirty = true;
             Save(); // the mode being left keeps its screens
             stationary = toStationary;
             Workspace? stored = LayoutStore.Load(stationary);
             workspace = stored ?? new Workspace();
-            layout = LayoutStore.WithScreensFor(workspace.Current.Layout, AutoAddable(), OpticsOf(view));
-            if (stationary && stored is null) layout = Presets.FitInView(layout, PictureSize, OpticsOf(view));
+            layout = LayoutStore.WithScreensFor(workspace.Current.Layout, AutoAddable(), OpticsFor(view));
+            if (stationary && stored is null) layout = Presets.FitInView(layout, PictureSize, OpticsFor(view));
             workspace = workspace.WithLayout(layout);
             dirty = true;
             shared.HoldHead = stationary;
@@ -1055,7 +1223,7 @@ internal static class LiveApp
         modeTimer.Tick += (_, _) =>
         {
             if (gameMode) return;
-            bool anchored = camera.Anchored;
+            bool anchored = glassesControl.Stationary ?? camera.Anchored;
             if (anchored != stationary) SwitchMode(anchored);
         };
         modeTimer.Start();
@@ -1077,11 +1245,45 @@ internal static class LiveApp
         };
         breakTimer.Start();
 
+        menuPick = choice =>
+        {
+            string name = choice >= 0 && choice < MenuChoices.Length ? MenuChoices[choice] : "";
+            Log.Line($"Hand quick menu: {name}.");
+            switch (choice)
+            {
+                case 0:
+                    blank = !blank;
+                    settings.SetBlank(blank);
+                    Publish();
+                    Notice(blank ? "Screens hidden: open your hand again to bring them back" : "Screens back", 3);
+                    break;
+                case 1:
+                    Act(Keys.D0);
+                    Notice("Recentred: the way you face is the front", 2);
+                    break;
+                case 2:
+                    putSelectedHere();
+                    break;
+                case 3:
+                    UseWorkspace(workspace.Select((workspace.Active + 1) % workspace.Profiles.Count));
+                    Notice($"Profile: {workspace.Current.Name}", 2);
+                    break;
+            }
+        };
+
         void Act(Keys key)
         {
             switch (key)
             {
                 case Keys.D0 or Keys.Home or Keys.Space:
+                    if (stationary)
+                    {
+                        // The room turns so its front is where you look, and the glasses glide the picture there.
+                        tracker.Recenter();
+                        shared.HeldYaw = shared.HeldPitch = 0;
+                        glassesControl.RecentreHeldPicture();
+                        return;
+                    }
                     if (vrMode) tracker.Recenter(); // the scene is not drawing in VR mode, so recentre here
                     else lock (gate) recenter = true;
                     return;
@@ -1203,6 +1405,14 @@ internal static class LiveApp
             // Windows can move the glasses among the monitors at any time (Display settings, or a monitor
             // coming or going). The scene and the rule that keeps the pointer out of it have to move along:
             // left where they were, they blocked the pointer from whichever monitor took that place.
+            if (fullScreen && !direct && now.FirstOrDefault(d => d.Id == targetId) is { } resized && resized.Bounds.Size != area.Size)
+            {
+                Log.Line($"The glasses changed to {resized.Bounds.Width}x{resized.Bounds.Height} (their ultrawide, say); starting the scene again at that size.");
+                s_unplugged = true;
+                displayTimer.Stop();
+                window.Close();
+                return;
+            }
             if (fullScreen && now.FirstOrDefault(d => d.Id == targetId) is { } glassesNow && glassesNow.Bounds != area)
             {
                 area = glassesNow.Bounds;
@@ -1236,9 +1446,11 @@ internal static class LiveApp
 
             // A screen whose virtual monitor is away (game mode, another profile) keeps its place and waits.
             int before = layout.Screens.Count;
-            layout = LayoutStore.WithScreensFor(layout, AutoAddable(), OpticsOf(view));
+            Layout beforeLayout = layout;
+            layout = placeNewAtGaze(beforeLayout, LayoutStore.WithScreensFor(layout, AutoAddable(), OpticsFor(view)));
             if (settled) adding = false;
             Log.Line($"Monitors changed: {sources.Count} to show, {layout.Screens.Count} screens{(layout.Screens.Count > before ? " (new screen added)" : "")}.");
+            LineUpDesktops(now);
             ShowVirtual();
             workspace = workspace.WithLayout(layout);
             PlanCursor();
@@ -1264,6 +1476,43 @@ internal static class LiveApp
         // change Windows has refused three times.
         var tuned = new Dictionary<string, (double At, int Refused)>(StringComparer.OrdinalIgnoreCase);
         var sizesAdded = new HashSet<(int, int)>();
+        // The extra monitors are lined up on the Windows desktop the way they sit in the room: a screen on your left
+        // is to the left of the laptop screen, so the mouse crosses between them the way you would expect. The
+        // glasses' own area goes below the laptop screen, out of the way. Done once for each set of monitors, so it
+        // never fights Windows, and only for monitors XrShift made.
+        void LineUpDesktops(List<DisplayInfo> now)
+        {
+            if (!fullScreen || direct || gameMode || args.Contains("--keep-modes")) return;
+            List<DisplayInfo> extra = now.Where(VirtualMonitors.IsVirtual).ToList();
+            DisplayInfo? main = now.FirstOrDefault(d => d.Primary && !d.IsGlasses);
+            if (extra.Count == 0 || main is null) return;
+            string set = string.Join("|", now.Select(d => d.Id).OrderBy(id => id, StringComparer.OrdinalIgnoreCase));
+            if (set == linedUpFor) return;
+            linedUpFor = set;
+
+            float YawOf(DisplayInfo d) => layout.Screens.FirstOrDefault(s => string.Equals(s.DisplayName, d.Id, StringComparison.OrdinalIgnoreCase))?.YawDeg ?? -90f;
+            float mainYaw = YawOf(main) is var y && y > -90f ? y : 0f;
+            var places = new List<(string, int, int)>();
+            int left = main.Bounds.Left, right = main.Bounds.Right, top = main.Bounds.Top;
+            foreach (DisplayInfo d in extra.Where(d => YawOf(d) > mainYaw).OrderBy(YawOf)) // yaw + is left: nearest first
+            {
+                left -= d.Bounds.Width;
+                places.Add((d.DeviceName, left, top));
+            }
+            foreach (DisplayInfo d in extra.Where(d => YawOf(d) <= mainYaw).OrderByDescending(YawOf))
+            {
+                places.Add((d.DeviceName, right, top));
+                right += d.Bounds.Width;
+            }
+            if (target is { IsGlasses: true } && now.FirstOrDefault(d => d.Id == targetId) is { } glassesNow)
+                places.Add((glassesNow.DeviceName, main.Bounds.Left, main.Bounds.Bottom));
+            bool already = places.All(p => now.FirstOrDefault(d => d.DeviceName == p.Item1) is { } d && d.Bounds.X == p.Item2 && d.Bounds.Y == p.Item3);
+            if (already) return;
+            Log.Line(DisplayModes.TryPlace(places, out string why)
+                ? $"Lined up {extra.Count} extra monitor(s) on the desktop to match the room."
+                : $"Could not line up the extra monitors: {why}");
+        }
+
         void TuneVirtualMonitors()
         {
             if (!fullScreen || args.Contains("--keep-modes") || shownOn.RefreshHz < 1) return;
@@ -1340,7 +1589,7 @@ internal static class LiveApp
                 shared.FollowYaw = 0;
             }
 
-            DisplayOptics optics = OpticsOf(now.View);
+            DisplayOptics optics = shared.HoldHead ? DisplayOptics.OnePro with { HorizontalFovDeg = now.View.HeldFovDeg } : OpticsOf(now.View);
             scene.Apply(now.Layout, now.Sources, now.Windows, optics);
             scene.Update();
             scene.RulerVisible = now.View.Ruler;
@@ -1398,7 +1647,8 @@ internal static class LiveApp
             Quaternion head = Quaternion.CreateFromAxisAngle(Vector3.UnitY, -drift) * pose.Orientation * trim;
             if (shared.HoldHead)
             {
-                heldHead ??= Quaternion.Identity; // straight into the picture the glasses hold still
+                // The view into the room through the picture the glasses hold still, from the direction it faces.
+                heldHead = Quaternion.CreateFromYawPitchRoll(shared.HeldYaw * DegToRad, shared.HeldPitch * DegToRad, 0);
                 head = heldHead.Value;
             }
             else
@@ -1406,8 +1656,10 @@ internal static class LiveApp
                 heldHead = null;
             }
             scene.SetHands(shared.HandsShown, shared.HandsFrame, shared.HandsPinching, shared.HandsStatus);
+            scene.SetMenu(shared.HandsShown ? shared.MenuItems : null, shared.MenuHighlight);
 
-            scene.Look(head, now.View.Dim, now.Blank, dt);
+            scene.Look(head, now.View.Dim, now.Blank, dt, now.View.EasyReading);
+            scene.PointToHiddenScreens(head, optics, now.View.EdgeArrows);
             renderer.Draw(head, optics);
 
             if (previewNow0() - ratesAt >= 2)

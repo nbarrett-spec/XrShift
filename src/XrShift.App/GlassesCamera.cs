@@ -39,6 +39,9 @@ internal sealed class GlassesCamera : IDisposable
         }
     }
 
+    /// <summary>Plain screen: the camera port is let go of entirely.</summary>
+    public volatile bool Paused;
+
     public void Start()
     {
         if (_stop is not null) return;
@@ -85,6 +88,11 @@ internal sealed class GlassesCamera : IDisposable
         var pending = new List<byte>(512 * 1024);
         while (!ct.IsCancellationRequested)
         {
+            if (Paused)
+            {
+                try { if (ct.WaitHandle.WaitOne(500)) return; } catch (ObjectDisposedException) { return; }
+                continue;
+            }
             try
             {
                 using var glasses = new TcpClient { NoDelay = true, ReceiveTimeout = 0 };
@@ -96,7 +104,7 @@ internal sealed class GlassesCamera : IDisposable
                 using CancellationTokenRegistration close = ct.Register(glasses.Close);
                 NetworkStream stream = glasses.GetStream();
                 pending.Clear();
-                while (!ct.IsCancellationRequested)
+                while (!ct.IsCancellationRequested && !Paused)
                 {
                     int n = stream.Read(buffer, 0, buffer.Length);
                     if (n == 0) break;

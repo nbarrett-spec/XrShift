@@ -26,6 +26,10 @@ internal sealed class SceneItem : IDisposable
     public bool Visible { get; set; } = true;
     /// <summary>Brightness, 1 = as is. Screens not looked at can be dimmed.</summary>
     public float Tint { get; set; } = 1f;
+    /// <summary>Reading without glasses: how much edges are sharpened (0 = not at all).</summary>
+    public float Sharpen { get; set; }
+    /// <summary>Contrast, 1 = as it is.</summary>
+    public float Contrast { get; set; } = 1f;
     /// <summary>
     /// Whether the picture keeps smaller copies of itself for when the screen is drawn small. They make
     /// shrunken text readable, but making them costs graphics-card time on every update, so a screen
@@ -56,6 +60,7 @@ internal sealed class Renderer : IDisposable
         {
             row_major float4x4 Transform;
             float4 Tint;
+            float4 Clarity; // x: sharpening, y: contrast, zw: one picture pixel in texture units
         };
         Texture2D Picture : register(t0);
         SamplerState Smooth : register(s0);
@@ -73,7 +78,17 @@ internal sealed class Renderer : IDisposable
 
         float4 PS(PixelIn p) : SV_TARGET
         {
-            return Picture.Sample(Smooth, p.uv) * Tint;
+            float4 c = Picture.Sample(Smooth, p.uv);
+            if (Clarity.x > 0)
+            {
+                // Edges stand out: each pixel pushed away from the average of its four neighbours.
+                float2 t = Clarity.zw;
+                float3 around = (Picture.Sample(Smooth, p.uv + float2(t.x, 0)).rgb + Picture.Sample(Smooth, p.uv - float2(t.x, 0)).rgb
+                               + Picture.Sample(Smooth, p.uv + float2(0, t.y)).rgb + Picture.Sample(Smooth, p.uv - float2(0, t.y)).rgb) * 0.25;
+                c.rgb = saturate(c.rgb + Clarity.x * (c.rgb - around));
+            }
+            c.rgb = saturate((c.rgb - 0.5) * Clarity.y + 0.5);
+            return c * Tint;
         }
         """;
 
@@ -82,6 +97,7 @@ internal sealed class Renderer : IDisposable
     {
         public Matrix4x4 Transform;
         public Vector4 Tint;
+        public Vector4 Clarity;
     }
 
     readonly ID3D11DeviceContext _context;
@@ -377,6 +393,8 @@ internal sealed class Renderer : IDisposable
             {
                 Transform = item.HeadLocked ? projection : viewProjection,
                 Tint = new Vector4(item.Tint, item.Tint, item.Tint, 1f),
+                Clarity = new Vector4(item.Sharpen, item.Contrast,
+                    1f / Math.Max(item.PictureSize.Width, 1), 1f / Math.Max(item.PictureSize.Height, 1)),
             };
             _context.UpdateSubresource(in constants, _constants);
             _context.IASetVertexBuffer(0, item.Vertices, (uint)Marshal.SizeOf<MeshVertex>());

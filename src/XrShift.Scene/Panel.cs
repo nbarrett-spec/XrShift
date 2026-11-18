@@ -22,6 +22,8 @@ public sealed record Panel
     public float Height { get; init; } = 0.9f;
     /// <summary>How far the screen wraps around horizontally, in degrees of arc. 0 = flat.</summary>
     public float CurveDeg { get; init; }
+    /// <summary>Turn about the screen's own upright middle line: + faces it more to the right. Flat screens only.</summary>
+    public float TurnDeg { get; init; }
 
     /// <summary>A band all the way around the wearer, e.g. a horizon ruler.</summary>
     public static Panel Ring(float radius, float height) => new()
@@ -67,7 +69,13 @@ public sealed record Panel
     {
         float curve = CurveDeg * DegToRad;
         float y = t * Height;
-        if (curve < 1e-3f) return new Vector3(s * Width, y, -Distance);
+        if (curve < 1e-3f)
+        {
+            if (MathF.Abs(TurnDeg) < 1e-3f) return new Vector3(s * Width, y, -Distance);
+            // Turned about the upright line through the middle: the right edge swings away for + turns.
+            float turn = TurnDeg * DegToRad;
+            return new Vector3(s * Width * MathF.Cos(turn), y, -Distance - s * Width * MathF.Sin(turn));
+        }
 
         // The width is laid along an arc that bulges away from the wearer.
         float radius = Width / curve;
@@ -90,10 +98,17 @@ public sealed record Panel
 
         if (curve < 1e-3f)
         {
-            if (d.Z > -1e-4f) return false;
-            float scale = -Distance / d.Z;
-            s = d.X * scale / Width;
-            t = d.Y * scale / Height;
+            // The flat screen's plane passes through (0, 0, -D); its across direction is (cos, 0, -sin) of the turn.
+            float turn = TurnDeg * DegToRad;
+            var across = new Vector3(MathF.Cos(turn), 0, -MathF.Sin(turn));
+            var normal = new Vector3(MathF.Sin(turn), 0, MathF.Cos(turn));
+            float facing = Vector3.Dot(d, normal);
+            if (facing > -1e-4f) return false;
+            float reach = Vector3.Dot(new Vector3(0, 0, -Distance), normal) / facing;
+            if (reach <= 0) return false;
+            Vector3 onPlane = d * reach - new Vector3(0, 0, -Distance);
+            s = Vector3.Dot(onPlane, across) / Width;
+            t = onPlane.Y / Height;
             return true;
         }
 

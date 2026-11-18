@@ -78,6 +78,32 @@ internal static class DisplayModes
 
     static DEVMODE NewMode() => new() { dmDeviceName = "", dmFormName = "", dmSize = (short)Marshal.SizeOf<DEVMODE>() };
 
+    /// <summary>
+    /// Moves monitors on the Windows desktop (where the mouse crosses from one to the next) in one go, and has
+    /// Windows remember it. Only used on the virtual monitors XrShift made, and on the glasses' own area.
+    /// </summary>
+    public static bool TryPlace(IReadOnlyList<(string DeviceName, int X, int Y)> places, out string problem)
+    {
+        problem = "";
+        foreach ((string device, int x, int y) in places)
+        {
+            DEVMODE mode = NewMode();
+            if (!EnumDisplaySettings(device, -1, ref mode)) { problem = $"no mode for {device}"; return false; }
+            mode.dmPositionX = x;
+            mode.dmPositionY = y;
+            mode.dmFields = 0x00000020; // position
+            int result = ChangeDisplaySettingsEx(device, ref mode, IntPtr.Zero, 0x01 | 0x10000000 /* remember, apply later */, IntPtr.Zero);
+            if (result != 0) { problem = $"Windows refused to move {device} (code {result})"; return false; }
+        }
+        int applied = ChangeDisplaySettingsEx(null, IntPtr.Zero, IntPtr.Zero, 0, IntPtr.Zero);
+        if (applied == 0) return true;
+        problem = $"Windows refused the new arrangement (code {applied})";
+        return false;
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern int ChangeDisplaySettingsEx(string? deviceName, IntPtr mode, IntPtr window, int flags, IntPtr parameters);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     static extern bool EnumDisplaySettings(string deviceName, int modeNumber, ref DEVMODE mode);
 

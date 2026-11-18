@@ -125,6 +125,28 @@ internal static class WindowFinder
     /// programs running as administrator (Task Manager); and remembers the answer, because asking the usual
     /// way lists every process on the PC each time and made the list slow enough to stutter the mouse.
     /// </summary>
+    /// <summary>
+    /// A game (or any program) has taken the mouse for itself: the pointer is hidden, as it is while you play and
+    /// the mouse turns the camera. Moving the pointer then would turn the game's view instead.
+    /// </summary>
+    public static bool MouseTakenByProgram()
+    {
+        var info = new CURSORINFO { Size = Marshal.SizeOf<CURSORINFO>() };
+        return GetCursorInfo(ref info) && (info.Flags & 1 /* showing */) == 0;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct CURSORINFO { public int Size, Flags; public IntPtr Cursor; public POINT At; }
+    [DllImport("user32.dll")] static extern bool GetCursorInfo(ref CURSORINFO info);
+
+    /// <summary>The program (file name without .exe) that owns a window, or null.</summary>
+    public static string? ProgramOfWindow(IntPtr handle)
+    {
+        if (handle == IntPtr.Zero) return null;
+        GetWindowThreadProcessId(handle, out uint pid);
+        return pid == 0 ? null : ProgramOf(pid);
+    }
+
     static string? ProgramOf(uint pid)
     {
         lock (s_programs)

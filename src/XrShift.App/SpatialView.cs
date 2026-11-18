@@ -237,7 +237,7 @@ internal sealed class SpatialView : Control
         float top = points.Take(points.Length / 2).Min(p => p.Y), left = points.Min(p => p.X);
         using Font label = Ui.Mono(8.5f);
         using var ink = new SolidBrush(Ui.Fade(Ui.Accent, 210));
-        g.DrawString("WHAT THE GLASSES HOLD STILL", label, ink, left, top - 18 * d);
+        g.DrawString("ONE VIEW OF THE GLASSES", label, ink, left, top - 18 * d);
     }
 
     void DrawScreens(Graphics g, float d)

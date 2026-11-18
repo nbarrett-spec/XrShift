@@ -1,12 +1,14 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using XrShift.Scene;
 
 namespace XrShift.App;
 
 /// <summary>
-/// The control panel on the PC's own screen. Most of it is the room: the screens floating around the wearer,
-/// seen from just behind the head, moved by dragging them. Beside it a slim inspector in three tabs: the
-/// selected screen, the space as a whole (arrangement, zoom, pointer), and fine tuning. Every change applies at once.
+/// XrShift's window on the PC, in five pages chosen from a side menu:
+/// Home: the four ways to use the glasses (what each gives and does not), the glasses' state, quick actions.
+/// Screens: the room with every screen in it (from above in stationary mode), and the selected screen's settings.
+/// Hands, Games, Settings: gestures, plain screen and VR, and fine tuning.
+/// Every change applies at once.
 /// </summary>
 internal sealed class SettingsWindow : Form
 {
@@ -23,35 +25,55 @@ internal sealed class SettingsWindow : Form
         ("Super ultrawide 32:9", 3840, 1080, 70),
     ];
 
-    const int TopBar = 60, InspectorWidth = 380, ViewWidth = 960, WindowHeight = 820;
+    /// <summary>TV sizes people know, in inches across the diagonal.</summary>
+    static readonly int[] TvSizes = [24, 32, 43, 55, 65, 75, 100, 150];
 
+    const int Rail = 96, TopBar = 64, InspectorWidth = 380, ViewWidth = 960, WindowHeight = 820;
+    const int ContentWidth = ViewWidth + InspectorWidth, PageHeight = WindowHeight - TopBar;
+    const float FeetPerMetre = 3.2808f;
+
+    // Frame.
+    readonly NavRail _rail = new();
+    readonly AuroraPanel _homePage = new(), _handsPage = new(), _gamesPage = new(), _settingsPage = new();
+    readonly System.Windows.Forms.Panel _screensPage = new();
     readonly System.Windows.Forms.Panel _profileBar = new();
-    readonly PillButton _vr = new();
-    readonly PillButton _live = new(), _game = new(), _stationary = new(), _followMode = new();
+    readonly PillButton _live = new(), _modeChip = new(), _guide = new();
+    string _pageTitle = "Home";
+
+    // Home.
+    readonly ModeCard _cardFollow = new(), _cardStationary = new(), _cardPlain = new(), _cardVr = new();
+    readonly PillButton _game = new(), _vr = new();
+    readonly Label _homeStatus = new();
+    readonly WelcomeCard _welcome = new();
+
+    // Screens: the room and its dock.
     readonly SpatialView _space = new();
+    readonly FloorPlan _floor = new();
+    readonly PillButton _viewToggle = new();
+    bool _floorWanted = true;
     readonly PillButton _add = new(), _pin = new(), _remove = new(), _previewButton = new();
     readonly PictureBox _preview = new();
-    readonly WelcomeCard _welcome = new();
-    readonly PillButton _guide = new();
     readonly Label _virtualNote = new(), _hint = new();
-    readonly PillButton _tabScreen = new(), _tabStationary = new(), _tabSpace = new(), _tabTune = new();
-    readonly System.Windows.Forms.Panel _pageScreen = new(), _pageStationary = new(), _pageSpace = new(), _pageTune = new();
-    readonly PillButton _fit = new(), _drift = new();
-    readonly Label _modeNow = new();
-    bool _glassesStationary;
 
-    // Screen page.
+    // Screens: the inspector.
+    readonly PillButton _tabScreen = new(), _tabRoom = new();
+    readonly System.Windows.Forms.Panel _pageScreen = new(), _pageStationary = new(), _pageFollow = new();
     readonly TextBox _name = new();
-    readonly PillButton _source = new(), _visible = new(), _shape = new(), _rate = new();
-    readonly SliderRow _side, _height, _size, _curve, _tilt, _depth;
-    // Space page.
+    readonly PillButton _source = new(), _visible = new(), _follows = new(), _sizes = new(), _shape = new(), _rate = new();
+    readonly SliderRow _side, _height, _size, _depth, _turn, _curve, _tilt, _bright;
     readonly PillButton _pointerOff = new(), _pointerJump = new(), _pointerFollow = new(), _focus = new(), _toGaze = new();
-    readonly SliderRow _zoom;
-    readonly PillButton _dim = new(), _blank = new(), _place = new(), _recentre = new(), _break = new(), _hands = new();
+    readonly SliderRow _zoom, _held;
+    readonly PillButton _dim = new(), _blank = new(), _place = new(), _recentre = new(), _drift = new();
+    readonly PillButton _fit = new(), _putHere = new();
+
+    // Hands.
+    readonly PillButton _hands = new();
     readonly Label _handState = new();
-    // Tune page.
-    readonly SliderRow _delay, _fov, _level, _roll;
-    readonly PillButton _status = new(), _ruler = new(), _autostart = new(), _quit = new();
+
+    // Settings.
+    SliderRow _delay = null!, _fov = null!, _level = null!, _roll = null!, _easy = null!; // made on the Settings page
+    readonly PillButton _bigger = new();
+    readonly PillButton _status = new(), _ruler = new(), _arrows = new(), _break = new(), _autostart = new(), _quit = new(), _github = new();
 
     readonly List<SourceChoice> _choices = [];
     readonly string _defaultHint;
@@ -62,7 +84,7 @@ internal sealed class SettingsWindow : Form
     IReadOnlyList<string> _profiles = [];
     int _activeProfile;
     string? _selected;
-    bool _loading;
+    bool _loading, _glassesStationary, _gameOn, _vrOn;
 
     public event Action<Layout>? LayoutChanged;
     public event Action<ViewSettings>? ViewChanged;
@@ -70,6 +92,7 @@ internal sealed class SettingsWindow : Form
     public event Action? RecentreRequested;
     public event Action? PlaceRequested;
     public event Action? FitRequested;
+    public event Action? PutHereRequested;
     public event Action? MouseToGazeRequested;
     public event Action? QuitRequested;
     public event Action<int>? ProfileSelected;
@@ -87,6 +110,8 @@ internal sealed class SettingsWindow : Form
     /// <summary>The wearer picked an open window to float as a screen of its own.</summary>
     public event Action<WindowInfo>? WindowPinRequested;
 
+    /// <summary>The screen chosen in this window, if any.</summary>
+    public string? SelectedId => _selected;
     /// <summary>True when a virtual monitor driver is there, so Add can make real monitors instead of stand-in pictures.</summary>
     public bool CanAddMonitors { get; set; }
     /// <summary>While the app runs, the window's close button quits the app (the window itself is closed by the app).</summary>
@@ -97,7 +122,9 @@ internal sealed class SettingsWindow : Form
         _layout = layout;
         _view = view;
         _sources = sources;
-        _defaultHint = $"{recentreKey} recentre   ·   Ctrl+Alt+S this window\nCtrl+Alt+L pointer: off, jump, follow   ·   Ctrl+Alt+P pick up / set down\nCtrl+Alt+PgUp / PgDn zoom   ·   Ctrl+Alt+B hide all\nCtrl+Alt+G plain screen   ·   Ctrl+Alt+V VR   ·   Ctrl+Alt+Q or X quits";
+        _defaultHint = $"{recentreKey} recentre  ·  Ctrl+Alt+S this window  ·  Ctrl+Alt+P put a screen where you look\n" +
+                       "Ctrl+Alt+L pointer  ·  Ctrl+Alt+PgUp / PgDn zoom  ·  Ctrl+Alt+B hide all\n" +
+                       "Ctrl+Alt+G plain screen  ·  Ctrl+Alt+V VR  ·  Ctrl+Alt+Q or X quits";
 
         Text = "XrShift";
         Icon = AppIcon.Value;
@@ -107,40 +134,48 @@ internal sealed class SettingsWindow : Form
         FormBorderStyle = FormBorderStyle.FixedSingle;
         MaximizeBox = false;
         StartPosition = FormStartPosition.Manual;
-        ClientSize = new Size(ViewWidth + InspectorWidth, WindowHeight);
+        ClientSize = new Size(Rail + ContentWidth, WindowHeight);
         DoubleBuffered = true;
 
-        // ---- top bar: wordmark (painted), profiles, live numbers, plain screen -----------------
-        _profileBar.SetBounds(150, 13, 580, 34);
+        // ---- side menu --------------------------------------------------------------------------
+        _rail.SetBounds(0, 0, Rail, WindowHeight);
+        _rail.Add("", "Home");
+        _rail.Add("", "Screens");
+        _rail.Add("", "Hands");
+        _rail.Add("", "Games");
+        _rail.Add("", "Settings");
+        _rail.Selected += i => ShowSection(i);
+        Controls.Add(_rail);
+
+        // ---- top bar: page title (painted), profiles, glasses mode, live numbers, guide ----------
+        _profileBar.SetBounds(Rail + 190, 15, 560, 34);
         _profileBar.BackColor = Ui.Back;
         Controls.Add(_profileBar);
-
-        Place(_vr, this, "VR", ViewWidth + InspectorWidth - 236, 13, 76, 34, PillButton.Looks.Solid,
-            "Play SteamVR games on the glasses, seated: XrShift steps aside and the glasses become a VR headset that follows your head's turns. For depth, switch the glasses to their 3D mode first. Ctrl+Alt+V.");
-        _vr.Click += (_, _) => VrModeChanged?.Invoke(!_vr.On);
-        Place(_live, this, "starting", ViewWidth + InspectorWidth - 374, 13, 132, 34, PillButton.Looks.Ghost,
+        Place(_modeChip, this, "", Rail + ContentWidth - 16 - 40 - 8 - 150 - 8 - 168, 15, 168, 34, PillButton.Looks.Ghost,
+            "Which way the glasses are working now. Follow and stationary are switched with the button on the glasses; XrShift notices by itself.");
+        _modeChip.Cursor = Cursors.Default;
+        _modeChip.TabStop = false;
+        _modeChip.Click += (_, _) => ShowSection(0);
+        Place(_live, this, "starting", Rail + ContentWidth - 16 - 40 - 8 - 150, 15, 150, 34, PillButton.Looks.Ghost,
             "Frames per second in the glasses, and how long a frame takes from reading your head to reaching the glasses.");
         _live.Font = Ui.Mono(9.5f);
         _live.TabStop = false;
         _live.Cursor = Cursors.Default;
-        Place(_game, this, "Plain screen", ViewWidth + InspectorWidth - 154, 13, 138, 34, PillButton.Looks.Solid,
-            "Steps aside: the glasses become an ordinary extended screen (for a game, say). Virtual monitors are removed until you switch it off. Ctrl+Alt+G.");
-        _game.Click += (_, _) => GameModeChanged?.Invoke(!_game.On);
+        Place(_guide, this, "?", Rail + ContentWidth - 16 - 40, 15, 40, 34, PillButton.Looks.Ghost, "The short guide: the modes and how to add screens.");
+        _guide.Click += (_, _) => { ShowSection(0); _welcome.Visible = true; _welcome.BringToFront(); };
 
-        // The two ways the screens behave, side by side so it is always clear which one is on.
-        // The glasses' own two modes, switched with the glasses' button. XrShift notices which one is on (lit) and
-        // keeps separate screens and settings for each; clicking opens that mode's page.
-        Place(_stationary, this, "Stationary", 742, 13, 112, 34, PillButton.Looks.Solid,
-            "The glasses hold their picture still in the room with their own camera tracking: screens stay put even when you lean or walk. Switch with the glasses' own button. Its screens and hand gestures are on the Stationary page.");
-        _stationary.Click += (_, _) => ShowPage(_pageStationary);
-        Place(_followMode, this, "Follow", 858, 13, 96, 34, PillButton.Looks.Solid,
-            "XrShift tracks your head and places screens all around you, with virtual monitors and look-to-point. Switch with the glasses' own button. Its settings are on the Follow page.");
-        _followMode.Click += (_, _) => ShowPage(_pageSpace);
-        Place(_guide, this, "?", 698, 13, 34, 34, PillButton.Looks.Ghost, "Shows the short guide again: the two modes and how to add screens.");
-        _guide.Click += (_, _) => { _welcome.Visible = true; _welcome.BringToFront(); };
+        foreach (Control page in new Control[] { _homePage, _screensPage, _handsPage, _gamesPage, _settingsPage })
+        {
+            page.SetBounds(Rail, TopBar, ContentWidth, PageHeight);
+            page.Visible = false;
+            Controls.Add(page);
+        }
 
-        // ---- the room ---------------------------------------------------------------------------
-        _space.SetBounds(0, TopBar, ViewWidth, WindowHeight - TopBar);
+        BuildHome();
+
+        // ---- Screens: the room ---------------------------------------------------------------------
+        _screensPage.BackColor = Ui.Inspector;
+        _space.SetBounds(0, 0, ViewWidth, PageHeight);
         _space.Font = Font;
         _space.Picked += id => { if (_selected != id) { _selected = id; Refill(); } };
         _space.Moved += (id, yaw, pitch) =>
@@ -153,91 +188,105 @@ internal sealed class SettingsWindow : Form
         {
             if (_selected != id) { _selected = id; Refill(); }
             Change(s => s with { Scale = scale });
-            Quietly(() => _size.Value = scale * 100f);
+            LoadSelected();
         };
         _space.HintWanted += h => _hint.Text = h;
         _space.MouseLeave += (_, _) => _hint.Text = _defaultHint;
-        Controls.Add(_space);
+        _screensPage.Controls.Add(_space);
 
-        // The dock along the bottom of the room.
-        int dockY = WindowHeight - TopBar - 50;
-        Place(_add, _space, "+  Monitor", 16, dockY, 118, 36, PillButton.Looks.Accent, "");
-        _add.MouseEnter += (_, _) => _hint.Text = CanAddMonitors
-            ? "Adds a real extra monitor to Windows and floats it beside the others. Each one costs Windows some speed: pinned windows cost nothing. Hold Shift for a test picture instead."
-            : "No virtual monitor driver found, so this adds a test picture.";
+        // Stationary mode: the room from above, the easy way to put screens on walls and at distances.
+        _floor.SetBounds(0, 0, ViewWidth, PageHeight - 64);
+        _floor.DockHeight = 0;
+        _floor.Font = Font;
+        _floor.Visible = false;
+        _floor.Picked += id => { if (_selected != id) { _selected = id; Refill(); } };
+        _floor.Placed += (id, yaw, distance, scale) =>
+        {
+            if (_selected != id) { _selected = id; Refill(); }
+            Change(s => s with { YawDeg = yaw, Distance = distance, Scale = scale });
+            LoadSelected();
+        };
+        _floor.HintWanted += h => _hint.Text = h;
+        _space.Controls.Add(_floor);
+        Place(_viewToggle, _space, "3D view", ViewWidth - 16 - 120, 14, 120, 32, PillButton.Looks.Solid,
+            "Switch between the room from above (easiest for putting screens on walls) and the 3D view.");
+        _viewToggle.Click += (_, _) => { _floorWanted = !_floorWanted; ShowFloorOrRoom(); };
+        _viewToggle.Visible = false;
+        _viewToggle.BringToFront();
+
+        int dockY = PageHeight - 50;
+        Place(_add, _space, "+  Add monitor", 16, dockY, 138, 36, PillButton.Looks.Accent, "");
+        _add.MouseEnter += (_, _) => _hint.Text = CanAddMonitors || VirtualMonitors.Installed
+            ? "Adds a real extra monitor to Windows and puts it in the room. Drag windows onto it like any monitor. Hold Shift for a test picture instead."
+            : "Extra monitors need a free display driver. Click to set it up, or add a test picture.";
         _add.Click += (_, _) =>
         {
-            if (CanAddMonitors && (ModifierKeys & Keys.Shift) == 0) MonitorAddRequested?.Invoke();
-            else AddScreen();
+            if ((CanAddMonitors || VirtualMonitors.Installed) && (ModifierKeys & Keys.Shift) == 0) MonitorAddRequested?.Invoke();
+            else ShowNoMonitorMenu();
         };
-        Place(_pin, _space, "Pin window", 140, dockY, 118, 36, PillButton.Looks.Solid,
-            "Floats one window (Teams, Chrome, your work desktop...) as a screen of its own. It costs Windows nothing, unlike a monitor.");
+        Place(_pin, _space, "Pin a window", 160, dockY, 126, 36, PillButton.Looks.Solid,
+            "Floats one window (Teams, a browser, your work desktop...) as a screen of its own. It costs Windows nothing.");
         _pin.Click += (_, _) => ShowWindowMenu();
-        Place(_remove, _space, "Remove", 264, dockY, 96, 36, PillButton.Looks.Ghost,
-            "Removes the selected screen. A virtual monitor goes from Windows too. A real monitor can only be hidden.");
+        Place(_remove, _space, "Remove", 292, dockY, 92, 36, PillButton.Looks.Ghost,
+            "Removes the selected screen. An extra monitor goes from Windows too. A real monitor can only be hidden.");
         _remove.Click += (_, _) => RemoveSelected();
-        Place(_previewButton, _space, "Glasses view", 372, dockY, 132, 36, PillButton.Looks.Solid,
-            "Shows a live picture of what the glasses show, top right of the room. Handy for testing and for showing XrShift to someone.");
+        Place(_previewButton, _space, "Glasses view", 390, dockY, 120, 36, PillButton.Looks.Solid,
+            "Shows a live picture of what the glasses show, top right of the room.");
         _previewButton.Click += (_, _) =>
         {
             _previewButton.On = !_previewButton.On;
             _preview.Visible = _previewButton.On;
             if (!_previewButton.On) { _preview.Image?.Dispose(); _preview.Image = null; }
         };
-        _preview.SetBounds(ViewWidth - 16 - 416, 52, 416, 234);
+        _preview.SetBounds(ViewWidth - 16 - 416, 56, 416, 234);
         _preview.SizeMode = PictureBoxSizeMode.Zoom;
         _preview.BackColor = Color.Black;
         _preview.BorderStyle = BorderStyle.FixedSingle;
         _preview.Visible = false;
         _space.Controls.Add(_preview);
-        _welcome.SetBounds((ViewWidth - 600) / 2, 70, 600, 420);
-        _welcome.Visible = WelcomeCard.FirstTime;
-        _space.Controls.Add(_welcome);
-        _welcome.BringToFront();
-        _virtualNote.SetBounds(512, dockY + 9, 108, 20);
+        _preview.BringToFront();
+        _virtualNote.SetBounds(16, dockY - 24, 300, 20);
         _virtualNote.ForeColor = Ui.Faint;
-        _virtualNote.BackColor = Ui.Dock;
+        _virtualNote.BackColor = Ui.RoomFloor;
         _virtualNote.Font = Ui.Mono(8.5f);
-        _space.Controls.Add(_virtualNote);
+        _virtualNote.Visible = false;
 
-        int px = ViewWidth - 16 - 4 * 82 + 6;
+        int px = ViewWidth - 16 - 5 * 78 + 6;
         foreach ((string text, Arrangement how, string hint) in new[]
         {
             ("Row", Arrangement.Row, "All shown screens side by side at eye level."),
-            ("Curve", Arrangement.Curve, "Side by side and wrapped around you: one long curved band, every part the same distance away."),
+            ("Curve", Arrangement.Curve, "Side by side and wrapped around you: one long curved band."),
             ("2 rows", Arrangement.TwoRows, "One row at eye level, the rest in a row above."),
             ("Focus", Arrangement.Focus, "The selected screen straight ahead at full size, the others smaller beside it."),
+            ("Cinema", Arrangement.Cinema, "The selected screen big and gently curved straight ahead; the others are hidden (show them again on the Screen tab)."),
         })
         {
             var preset = new PillButton();
-            Place(preset, _space, text, px, dockY, 76, 36, PillButton.Looks.Ghost, hint + " It rearranges this profile; to keep the old one, make a copy first with +.");
+            Place(preset, _space, text, px, dockY, 72, 36, PillButton.Looks.Ghost, hint + " It rearranges this profile; to keep the old one, make a copy first with +.");
             preset.Click += (_, _) => Arrange(how);
-            px += 82;
+            px += 78;
         }
 
-        // ---- the inspector ------------------------------------------------------------------------
+        // ---- Screens: the inspector ------------------------------------------------------------------
         var inspector = new System.Windows.Forms.Panel { BackColor = Ui.Inspector };
-        inspector.SetBounds(ViewWidth, TopBar, InspectorWidth, WindowHeight - TopBar);
-        Controls.Add(inspector);
-
-        int tabX = 16;
-        tabX = 8;
-        foreach ((PillButton tab, string text, System.Windows.Forms.Panel page) in new[] { (_tabScreen, "Screen", _pageScreen), (_tabStationary, "Stationary", _pageStationary), (_tabSpace, "Follow", _pageSpace), (_tabTune, "Tune", _pageTune) })
+        inspector.SetBounds(ViewWidth, 0, InspectorWidth, PageHeight);
+        _screensPage.Controls.Add(inspector);
+        Place(_tabScreen, inspector, "Screen", 12, 10, 120, 36, PillButton.Looks.Tab, "The selected screen: where it is, how big, what it shows.");
+        _tabScreen.Font = Ui.Text(10.5f, bold: true);
+        _tabScreen.Click += (_, _) => ShowInspector(_pageScreen);
+        Place(_tabRoom, inspector, "Follow options", 136, 10, 170, 36, PillButton.Looks.Tab, "Options for the way the glasses are working now.");
+        _tabRoom.Font = Ui.Text(10.5f, bold: true);
+        _tabRoom.Click += (_, _) => ShowInspector(_glassesStationary ? _pageStationary : _pageFollow);
+        foreach (System.Windows.Forms.Panel page in new[] { _pageScreen, _pageStationary, _pageFollow })
         {
-            int wide = text == "Stationary" ? 104 : 82;
-            Place(tab, inspector, text, tabX, 10, wide, 36, PillButton.Looks.Tab, "");
-            tab.Font = Ui.Text(10.5f, bold: true);
-            tab.Click += (_, _) => ShowPage(page);
-            tabX += wide + 4;
-            page.SetBounds(0, 56, InspectorWidth, 560);
+            page.SetBounds(0, 54, InspectorWidth, 560);
             page.BackColor = Ui.Inspector;
             inspector.Controls.Add(page);
         }
-
-        _hint.SetBounds(20, WindowHeight - TopBar - 128, InspectorWidth - 36, 112);
+        _hint.SetBounds(20, PageHeight - 120, InspectorWidth - 36, 108);
         _hint.ForeColor = Ui.Muted;
         _hint.BackColor = Ui.Inspector;
-        _hint.Font = Ui.Text(9f);
+        _hint.Font = Ui.Text(8.75f);
         _hint.Text = _defaultHint;
         inspector.Controls.Add(_hint);
         inspector.Paint += (_, e) =>
@@ -245,172 +294,427 @@ internal sealed class SettingsWindow : Form
             using var rule = new Pen(Ui.Line);
             e.Graphics.DrawLine(rule, 0, 0, 0, inspector.Height);
             float d = DeviceDpi / 96f;
-            e.Graphics.DrawLine(rule, 20 * d, _hint.Top - 12 * d, inspector.Width - 20 * d, _hint.Top - 12 * d);
+            e.Graphics.DrawLine(rule, 20 * d, _hint.Top - 10 * d, inspector.Width - 20 * d, _hint.Top - 10 * d);
         };
 
-        // Screen page.
-        _name.SetBounds(20, 6, InspectorWidth - 40, 34);
+        // The selected screen.
+        _name.SetBounds(20, 4, InspectorWidth - 40, 34);
         _name.BackColor = Ui.Inspector;
         _name.ForeColor = Ui.Ink;
         _name.BorderStyle = BorderStyle.None;
-        _name.Font = Ui.Display(17f);
+        _name.Font = Ui.Display(16f);
         _name.TextChanged += (_, _) => Change(s => s with { Name = _name.Text });
         _pageScreen.Controls.Add(_name);
-        Place(_source, _pageScreen, "", 20, 46, InspectorWidth - 40, 32, PillButton.Looks.Ghost,
+        Place(_source, _pageScreen, "", 20, 42, InspectorWidth - 40, 32, PillButton.Looks.Solid,
             "What this screen shows: a monitor, a pinned window or a test picture. Click to change it.");
         _source.Click += (_, _) => ShowSourceMenu();
-        int y = 92;
-        _side = Slider(_pageScreen, "Left / right", -180, 180, 0.5f, 0, 1, "°", true,
-            "Where the screen sits around you. 0 is straight ahead after recentring. Or drag it in the room.", ref y, v => Change(s => s with { YawDeg = -v }));
-        _height = Slider(_pageScreen, "Down / up", -45, 45, 0.5f, 0, 1, "°", true,
+        int y = 84;
+        _side = Slider(_pageScreen, "Left / right", -180, 180, 1, 0, 0, "°", true,
+            "Where the screen sits around you. 0 is straight ahead, 90 is to your right, -90 to your left. Or drag it in the room.", ref y, v => Change(s => s with { YawDeg = -v }));
+        _height = Slider(_pageScreen, "Down / up", -60, 60, 1, 0, 0, "°", true,
             "How far above or below eye level the screen sits.", ref y, v => Change(s => s with { PitchDeg = v }));
-        _size = Slider(_pageScreen, "Size", 30, 250, 1, 85, 0, " %", false,
-            "100 % shows the picture pixel for pixel, the sharpest the glasses can do. Smaller fits more in view. Or scroll over it in the room.", ref y, v => Change(s => s with { Scale = v / 100f }));
+        _size = Slider(_pageScreen, "Size", 10, 300, 1, 55, 0, " in", false,
+            "Its size across the diagonal, like a TV. The Sizes button has the common ones.", ref y, v => ChangeSize(v));
+        _depth = Slider(_pageScreen, "Distance", 2, 29.5f, 0.5f, 6.5f, 1, " ft", false,
+            "How far away it is. It keeps its real size, so further away looks smaller, as a real screen would.", ref y,
+            v => Change(s => s.AtDistanceKeepingSize(v / FeetPerMetre)));
+        _turn = Slider(_pageScreen, "Turn", -75, 75, 1, 0, 0, "°", true,
+            "Turns the screen to face left or right, like a TV flat on a side wall. 0 faces you. Flat screens only.", ref y, v => Change(s => s with { TurnDeg = v }));
         _curve = Slider(_pageScreen, "Curve", 0, 120, 1, 0, 0, "°", false,
             "Wraps the screen around you. 0 is flat.", ref y, v => Change(s => s with { CurveDeg = v }));
         _tilt = Slider(_pageScreen, "Tilt", -30, 30, 0.5f, 0, 1, "°", true,
             "Turns the screen clockwise or anticlockwise.", ref y, v => Change(s => s with { TiltDeg = v }));
-        _depth = Slider(_pageScreen, "Distance", 1, 6, 0.1f, 2, 1, " m", false,
-            "Only decides which screen covers which where they overlap: nearer ones are in front.", ref y, v => Change(s => s with { Distance = v }));
-        y += 10;
-        Place(_visible, _pageScreen, "Shown", 20, y, 96, 32, PillButton.Looks.Solid, "Switch a screen off without losing its place.");
+        _bright = Slider(_pageScreen, "Brightness", 20, 100, 5, 100, 0, " %", false,
+            "How bright this screen is in the glasses. Lower it for a screen you only glance at.", ref y, v => Change(s => s with { Brightness = v / 100f }));
+        y += 8;
+        Place(_visible, _pageScreen, "Shown", 20, y, 104, 32, PillButton.Looks.Solid, "Switch a screen off without losing its place.");
         _visible.Click += (_, _) => Change(s => s with { Visible = !s.Visible });
-        Place(_shape, _pageScreen, "Standard 16:9", 122, y, 150, 32, PillButton.Looks.Ghost,
-            "For a virtual monitor: its shape. An ultrawide is one long desktop for two or three windows side by side, and costs Windows less than separate monitors.");
+        Place(_follows, _pageScreen, "Follows me", 130, y, 116, 32, PillButton.Looks.Solid,
+            "The screen stays in the same spot of your view as you turn, like a heads-up display: good for a chat or a clock. Off: it stays in the room.");
+        _follows.Click += (_, _) => Change(s => s with { FollowsMe = !s.FollowsMe });
+        Place(_sizes, _pageScreen, "Sizes  ▾", 252, y, 108, 32, PillButton.Looks.Ghost, "Common TV sizes.");
+        _sizes.Click += (_, _) => ShowSizesMenu();
+        y += 40;
+        Place(_shape, _pageScreen, "Standard 16:9", 20, y, 226, 32, PillButton.Looks.Ghost,
+            "For an extra monitor: its shape. An ultrawide is one long desktop for two or three windows side by side.");
         _shape.Click += (_, _) => ShowShapeMenu();
-        Place(_rate, _pageScreen, "60 Hz", 278, y, 82, 32, PillButton.Looks.Solid,
-            "For a virtual monitor: 60 Hz for reading, easy on the graphics card. 120 Hz for a screen you play on.");
+        Place(_rate, _pageScreen, "60 Hz", 252, y, 108, 32, PillButton.Looks.Solid,
+            "For an extra monitor: 60 Hz for reading, easy on the graphics card. 120 Hz for a screen you play on.");
         _rate.Click += (_, _) => Change(s => s with { RefreshHz = s.RefreshHz >= 100 ? 0 : 120 });
 
-        // Space page.
+        // Follow options.
         y = 6;
-        Head(_pageSpace, "Pointer", ref y);
-        Place(_pointerOff, _pageSpace, "Off", 20, y, 106, 32, PillButton.Looks.Solid, "The mouse pointer moves only by hand.");
+        Head(_pageFollow, "Look to point", ref y);
+        Place(_pointerOff, _pageFollow, "Off", 20, y, 106, 32, PillButton.Looks.Solid, "The mouse pointer moves only by hand.");
         _pointerOff.Click += (_, _) => ChangeView(s => s with { LookPointer = false, LookFollow = false });
-        Place(_pointerJump, _pageSpace, "Jump", 132, y, 106, 32, PillButton.Looks.Solid,
-            "Look at another screen for a moment and the pointer jumps to the spot you look at. Moving the mouse by hand always wins.");
+        Place(_pointerJump, _pageFollow, "Jump", 132, y, 106, 32, PillButton.Looks.Solid,
+            "Look at another screen for a moment and the pointer jumps to the spot you look at. Moving the mouse by hand always wins. Pauses while a game has the mouse.");
         _pointerJump.Click += (_, _) => ChangeView(s => s with { LookPointer = true, LookFollow = false });
-        Place(_pointerFollow, _pageSpace, "Follow", 244, y, 116, 32, PillButton.Looks.Solid,
-            "The pointer rides the middle of your view: aim with your head, click with the mouse. Nudge it by hand to fine-tune; it waits until your head moves on.");
+        Place(_pointerFollow, _pageFollow, "Follow", 244, y, 116, 32, PillButton.Looks.Solid,
+            "The pointer rides the middle of your view: aim with your head, click with the mouse. Pauses while a game has the mouse.");
         _pointerFollow.Click += (_, _) => ChangeView(s => s with { LookPointer = true, LookFollow = true });
         y += 40;
-        Place(_focus, _pageSpace, "Keyboard follows", 20, y, 162, 32, PillButton.Looks.Solid,
-            "The window the pointer moves to also gets the keyboard, so you can look from a game to your work desktop and type. Some games pause when they lose it.");
+        Place(_focus, _pageFollow, "Keyboard follows", 20, y, 162, 32, PillButton.Looks.Solid,
+            "The window the pointer moves to also gets the keyboard, so you can look from a game to your work desktop and type.");
         _focus.Click += (_, _) => ChangeView(s => s with { LookFocus = !s.LookFocus });
-        Place(_toGaze, _pageSpace, "Mouse here now", 188, y, 172, 32, PillButton.Looks.Ghost, "Puts the pointer where you are looking, once. Ctrl+Alt+M.");
+        Place(_toGaze, _pageFollow, "Mouse here now", 188, y, 172, 32, PillButton.Looks.Ghost, "Puts the pointer where you are looking, once. Ctrl+Alt+M.");
         _toGaze.Click += (_, _) => MouseToGazeRequested?.Invoke();
         y += 52;
-        Head(_pageSpace, "All screens", ref y);
-        _zoom = Slider(_pageSpace, "Zoom", ViewSettings.MinZoom * 100, ViewSettings.MaxZoom * 100, 5, 100, 0, " %", false,
+        Head(_pageFollow, "All screens", ref y);
+        _zoom = Slider(_pageFollow, "Zoom", ViewSettings.MinZoom * 100, ViewSettings.MaxZoom * 100, 5, 100, 0, " %", false,
             "Every screen bigger or smaller at once, keeping the arrangement. Ctrl+Alt+PgUp / PgDn from anywhere.", ref y,
             v => ChangeView(s => s with { Zoom = v / 100f }));
         y += 6;
-        Place(_dim, _pageSpace, "Dim others", 20, y, 106, 32, PillButton.Looks.Solid,
-            "Screens you are not looking at go darker, so the one you read stands out and the rest are easier on the eyes.");
+        Place(_dim, _pageFollow, "Dim others", 20, y, 106, 32, PillButton.Looks.Solid,
+            "Screens you are not looking at go darker, so the one you read stands out.");
         _dim.Click += (_, _) => ChangeView(s => s with { Dim = !s.Dim });
-        Place(_blank, _pageSpace, "Hide all", 132, y, 106, 32, PillButton.Looks.Solid, "Hides every screen so you see the room. Ctrl+Alt+B.");
+        Place(_blank, _pageFollow, "Hide all", 132, y, 106, 32, PillButton.Looks.Solid, "Hides every screen so you see the room. Ctrl+Alt+B.");
         _blank.Click += (_, _) => { _blank.On = !_blank.On; BlankChanged?.Invoke(_blank.On); };
-        Place(_place, _pageSpace, "Pick up", 244, y, 116, 32, PillButton.Looks.Ghost,
-            "Picks up the screen you are looking at: turn your head to carry it, Ctrl+Alt+PgUp / PgDn to resize it, then Ctrl+Alt+P to set it down. Ctrl+Alt+P to pick up too.");
+        Place(_place, _pageFollow, "Pick up", 244, y, 116, 32, PillButton.Looks.Ghost,
+            "Picks up the screen you are looking at: turn your head to carry it, then Ctrl+Alt+P to set it down.");
         _place.Click += (_, _) => PlaceRequested?.Invoke();
         y += 40;
-        Place(_recentre, _pageSpace, "Recentre", 20, y, 106, 32, PillButton.Looks.Ghost, $"Makes the way you face now straight ahead. {recentreKey}.");
+        Place(_recentre, _pageFollow, "Recentre", 20, y, 106, 32, PillButton.Looks.Ghost, $"Makes the way you face now straight ahead. {recentreKey}.");
         _recentre.Click += (_, _) => RecentreRequested?.Invoke();
-        Place(_drift, _pageSpace, "Drift after me", 132, y, 140, 32, PillButton.Looks.Solid,
+        Place(_drift, _pageFollow, "Drift after me", 132, y, 140, 32, PillButton.Looks.Solid,
             "Turn far away and the screens drift after you, then settle in front again. Off, they stay where you put them.");
         _drift.Click += (_, _) => ChangeView(s => s with { Follow = !s.Follow });
 
-        // Stationary page.
+        // Stationary options.
         y = 6;
         Head(_pageStationary, "Stationary mode", ref y);
         var about = new Label
         {
-            Text = "Switch the glasses to stationary with their own button. They then hold their picture still in the room " +
-                   "using their camera (6DoF), and XrShift places your screens inside that picture, so all of them stay put " +
-                   "even when you lean or walk. Screens and profiles here are separate from Follow.",
+            Text = "Place screens anywhere in the room on the floor plan: in front, on a side wall, behind you. Turn to one and hold " +
+                   "still a moment: the glasses glide their picture there and hold it steady, even when you lean or walk. " +
+                   "Arrows at the edge of your view point to the screens you are not facing.",
             ForeColor = Ui.Muted, BackColor = Ui.Inspector, Font = Ui.Text(9f),
         };
-        about.SetBounds(20, y, InspectorWidth - 40, 74);
+        about.SetBounds(20, y, InspectorWidth - 40, 96);
         _pageStationary.Controls.Add(about);
-        y += 78;
-        _modeNow.SetBounds(20, y, InspectorWidth - 40, 22);
-        _modeNow.ForeColor = Ui.Accent;
-        _modeNow.BackColor = Ui.Inspector;
-        _modeNow.Font = Ui.Mono(9f);
-        _pageStationary.Controls.Add(_modeNow);
-        y += 30;
-        Place(_fit, _pageStationary, "Fit screens in view", 20, y, 190, 32, PillButton.Looks.Accent,
-            "Shrinks and centres the screens so all of them are inside what the glasses hold still. Arrange them with the presets first if you like.");
+        y += 104;
+        Place(_putHere, _pageStationary, "Put it where I look", 20, y, 166, 34, PillButton.Looks.Accent,
+            "Moves the selected screen (or the newest) to where you are looking now. Ctrl+Alt+P does the same.");
+        _putHere.Click += (_, _) => PutHereRequested?.Invoke();
+        Place(_fit, _pageStationary, "Gather in one view", 192, y, 168, 34, PillButton.Looks.Solid,
+            "Gathers every screen so all of them fit in one view, straight ahead.");
         _fit.Click += (_, _) => FitRequested?.Invoke();
-        y += 52;
-        Head(_pageStationary, "Hand gestures", ref y);
-        Place(_hands, _pageStationary, "Hand gestures", 20, y, 150, 32, PillButton.Looks.Solid,
-            "Your hand steers the pointer like a touchpad: move your palm to move it, pinch thumb and index finger to click, pinch and move to drag. Works while the glasses are in stationary mode, because only then is their camera on. Ctrl+Alt+K.");
+        y += 50;
+        _held = Slider(_pageStationary, "Held picture", ViewSettings.MinHeldFovDeg, ViewSettings.MaxHeldFovDeg, 1, DisplayOptics.OnePro.HorizontalFovDeg, 0, "°", false,
+            "How wide the picture the glasses hold still is. If you make it bigger in the glasses' own menu, set the same here.", ref y,
+            v => ChangeView(s => s with { HeldFovDeg = v }));
+
+        BuildHands();
+        BuildGames();
+        BuildSettings();
+
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+
+        ShowInspector(_pageScreen);
+        ShowSection(0);
+        Refill();
+        LoadView();
+        ShowModes();
+    }
+
+    // ---- the pages --------------------------------------------------------------------------------
+
+    void BuildHome()
+    {
+        var title = new Label { Text = "How do you want to use your glasses?", Font = Ui.Display(20f), ForeColor = Ui.Ink, BackColor = Color.Transparent, AutoSize = true };
+        title.Location = new Point(36, 26);
+        _homePage.Controls.Add(title);
+        var sub = new Label
+        {
+            Text = "Follow and Stationary are switched with the button on your glasses: XrShift notices by itself. Plain screen and VR are switched here.",
+            Font = Ui.Text(10f), ForeColor = Ui.Muted, BackColor = Color.Transparent, AutoSize = true,
+        };
+        sub.Location = new Point(38, 72);
+        _homePage.Controls.Add(sub);
+
+        int w = (ContentWidth - 72 - 3 * 18) / 4, h = 344, top = 112;
+        Setup(_cardFollow, "Follow", "", Ui.Accent, 36,
+            "XrShift follows your head and keeps your screens all around you.",
+            ["Screens in every direction", "Extra monitors and windows", "Look to move the mouse"],
+            ["Screens stay put only as you turn", "Hand gestures"],
+            "Switch with the button on your glasses.");
+        Setup(_cardStationary, "Stationary", "", Ui.Violet, 36 + (w + 18),
+            "The glasses hold the picture still in the room. Walk up close.",
+            ["Rock steady, even walking", "Screens on any wall", "Hand gestures and quick menu"],
+            ["One direction shown at once"],
+            "Switch with the button on your glasses.");
+        Setup(_cardPlain, "Plain screen", "", Ui.Warn, 36 + 2 * (w + 18),
+            "XrShift steps aside: the glasses are an ordinary monitor.",
+            ["Best for games", "Nothing in between"],
+            ["No extra screens", "No head tracking"], "");
+        Setup(_cardVr, "VR", "", Color.FromArgb(240, 171, 252), 36 + 3 * (w + 18),
+            "SteamVR games, seated: the glasses become a headset.",
+            ["Look around in games", "Works with a gamepad"],
+            ["Leaning or walking", "Motion controllers"], "");
+
+        Place(_game, _cardPlain, "Turn on", 18, h - 56, w - 36, 38, PillButton.Looks.Solid,
+            "The glasses become an ordinary extended screen, for a game, say. Extra monitors are removed until you switch it off. Ctrl+Alt+G.");
+        _game.Click += (_, _) => GameModeChanged?.Invoke(!_gameOn);
+        Place(_vr, _cardVr, "Start VR", 18, h - 56, w - 36, 38, PillButton.Looks.Solid,
+            "Starts SteamVR with the glasses as the headset. Put the glasses in Follow first; for depth, switch them to their 3D mode. Ctrl+Alt+V.");
+        _vr.Click += (_, _) => VrModeChanged?.Invoke(!_vrOn);
+        _ = top;
+
+        // The glasses right now, and things you do often.
+        var status = new Card { Title = "Your glasses now", BackColor = Ui.Inspector };
+        status.SetBounds(36, top + h + 22, 560, 216);
+        _homeStatus.SetBounds(20, 56, 520, 140);
+        _homeStatus.Text = "Waiting for the glasses.\nPlug them in, set Windows to Extend (Win+P), and XrShift takes it from there.";
+        _homeStatus.Font = Ui.Text(10.5f);
+        _homeStatus.ForeColor = Ui.Muted;
+        _homeStatus.BackColor = Ui.Inspector;
+        status.Controls.Add(_homeStatus);
+        _homePage.Controls.Add(status);
+
+        var quick = new Card { Title = "Quick actions", BackColor = Ui.Inspector };
+        quick.SetBounds(36 + 560 + 18, top + h + 22, ContentWidth - 72 - 560 - 18, 216);
+        _homePage.Controls.Add(quick);
+        int qx = 20, qy = 58;
+        foreach ((string text, string hint, Action act) in new (string, string, Action)[]
+        {
+            ("Add a monitor", "Opens the Screens page and adds an extra monitor.", () => { ShowSection(1); _add.PerformClick(); }),
+            ("Pin a window", "Opens the Screens page to float a window as a screen.", () => { ShowSection(1); ShowWindowMenu(); }),
+            ("Recentre", "Makes the way you face now straight ahead.", () => RecentreRequested?.Invoke()),
+            ("Hide all screens", "Hides every screen so you see the room. Click again to bring them back.", () => { _blank.On = !_blank.On; BlankChanged?.Invoke(_blank.On); }),
+            ("Glasses view", "Opens the Screens page with a live picture of what the glasses show.", () => { ShowSection(1); if (!_previewButton.On) _previewButton.PerformClick(); }),
+            ("Show the guide", "The short guide again.", () => { _welcome.Visible = true; _welcome.BringToFront(); }),
+        })
+        {
+            var b = new PillButton();
+            Place(b, quick, text, qx, qy, 200, 40, PillButton.Looks.Solid, hint);
+            b.Click += (_, _) => act();
+            qx += 212;
+            if (qx + 200 > quick.Width - 10) { qx = 20; qy += 52; }
+        }
+
+        _welcome.SetBounds((ContentWidth - 600) / 2, 90, 600, 420);
+        _welcome.Visible = WelcomeCard.FirstTime;
+        _homePage.Controls.Add(_welcome);
+        _welcome.BringToFront();
+
+        void Setup(ModeCard card, string name, string glyph, Color colour, int x, string tagline, string[] gets, string[] misses, string howTo)
+        {
+            card.Text = name;
+            card.Glyph = glyph;
+            card.LitColour = colour;
+            card.Tagline = tagline;
+            card.Gets = gets;
+            card.Misses = misses;
+            card.HowTo = howTo;
+            card.BackColor = Ui.Inspector;
+            card.SetBounds(x, top, w, h);
+            _homePage.Controls.Add(card);
+        }
+    }
+
+    void BuildHands()
+    {
+        PageTitle(_handsPage, "Hand gestures", "Steer with your hand while the glasses are in stationary mode: their camera only runs then. Nothing it sees leaves this PC or is saved.");
+        var main = new Card { Title = "Gestures", Subtitle = "Turn this on once; it works whenever the glasses are in stationary mode.", BackColor = Ui.Inspector };
+        main.SetBounds(36, 112, 420, 300);
+        Place(_hands, main, "Hand gestures: off", 20, 110, 380, 44, PillButton.Looks.Solid,
+            "Your hand steers the pointer like a touchpad. Ctrl+Alt+K.");
         _hands.Click += (_, _) =>
         {
             if (!HandInput.Installed) { OfferHandSetup(); return; }
             ChangeView(s => s with { Hands = !s.Hands });
         };
-        _handState.SetBounds(178, y + 7, InspectorWidth - 198, 22);
-        _handState.ForeColor = Ui.Muted;
+        _handState.SetBounds(22, 166, 380, 24);
+        _handState.ForeColor = Ui.Accent;
         _handState.BackColor = Ui.Inspector;
-        _handState.Font = Ui.Mono(9f);
-        _pageStationary.Controls.Add(_handState);
-        y += 40;
-        var howTo = new Label
+        _handState.Font = Ui.Mono(10f);
+        main.Controls.Add(_handState);
+        var note = new Label
         {
-            Text = "Hold your hand up in front of the glasses, palm out.\n· move the palm: move the pointer\n· pinch: click\n· pinch and move: drag\nGood light helps; the camera sees in grey.",
-            ForeColor = Ui.Muted, BackColor = Ui.Inspector, Font = Ui.Text(9f),
+            Text = "The first time, XrShift sets up Google's free hand tracker (about 390 MB, in a folder of its own). Good light helps: the camera sees in grey.",
+            ForeColor = Ui.Faint, BackColor = Ui.Inspector, Font = Ui.Text(9f),
         };
-        howTo.SetBounds(20, y, InspectorWidth - 40, 96);
-        _pageStationary.Controls.Add(howTo);
+        note.SetBounds(22, 204, 380, 80);
+        main.Controls.Add(note);
+        _handsPage.Controls.Add(main);
 
-        // Tune page.
-        y = 6;
-        Head(_pageTune, "Steadiness", ref y);
-        _delay = Slider(_pageTune, "Glasses delay", ViewSettings.MinDelayMs, ViewSettings.MaxDelayMs, 0.5f, 0, 1, " ms", true,
-            "Screens trail behind when you turn: raise it. They overshoot or jitter as you stop: lower it.", ref y,
-            v => ChangeView(s => s with { DelayMs = v }));
-        _fov = Slider(_pageTune, "View angle", ViewSettings.MinFovDeg, ViewSettings.MaxFovDeg, 0.1f, DisplayOptics.OnePro.HorizontalFovDeg, 1, "°", false,
-            "Screens follow your head a little as you turn: lower it. They move against your head: raise it.", ref y,
-            v => ChangeView(s => s with { FovDeg = v }));
-        _level = Slider(_pageTune, "Level", -ViewSettings.MaxLevelDeg, ViewSettings.MaxLevelDeg, 0.25f, 0, 2, "°", true,
-            "A screen off to the side tilts or climbs as you turn away from it: adjust until it stops.", ref y,
-            v => ChangeView(s => s with { LevelDeg = v }));
-        _roll = Slider(_pageTune, "Lean", -ViewSettings.MaxRollDeg, ViewSettings.MaxRollDeg, 0.25f, 0, 2, "°", true,
-            "Everything looks rotated: straighten it here.", ref y, v => ChangeView(s => s with { RollDeg = v }));
-        y += 10;
-        Place(_status, _pageTune, "Status line", 20, y, 106, 32, PillButton.Looks.Solid, "Keeps the line of numbers showing in the glasses. Ctrl+Alt+H.");
-        _status.Click += (_, _) => { _status.On = !_status.On; StatusPinnedChanged?.Invoke(_status.On); };
-        Place(_ruler, _pageTune, "Horizon ruler", 132, y, 122, 32, PillButton.Looks.Solid, "A ruler all the way round at eye level, marked in degrees.");
-        _ruler.Click += (_, _) => ChangeView(s => s with { Ruler = !s.Ruler });
-        y += 52;
-        Head(_pageTune, "Comfort", ref y);
-        Place(_break, _pageTune, "Break reminder: off", 20, y, 218, 32, PillButton.Looks.Solid,
-            "A line in the glasses every so often reminding you to look into the distance for 20 seconds. Click to change how often.");
-        _break.Click += (_, _) => ChangeView(s => s with { BreakMinutes = s.BreakMinutes switch { 0 => 20, 20 => 30, 30 => 45, 45 => 60, _ => 0 } });
-        y += 52;
-        Head(_pageTune, "App", ref y);
-        Place(_autostart, _pageTune, "Start with Windows", 20, y, 172, 32, PillButton.Looks.Solid,
-            "Starts XrShift quietly when you sign in. It waits in the tray, brings your screens up when the glasses are plugged in, and clears away any virtual monitors left from before.");
-        _autostart.On = Autostart.Enabled;
-        _autostart.Click += (_, _) =>
+        int x = 36 + 420 + 18, cw = (ContentWidth - x - 36 - 18) / 2;
+        (string Title, string Text)[] gestures =
+        [
+            ("Move", "Hold your hand up, palm out, and move it: the pointer moves like on a touchpad."),
+            ("Click", "Touch your thumb and index finger together, then let go."),
+            ("Drag", "Pinch, keep pinching while you move your hand, then let go."),
+            ("Quick menu", "Hold a flat hand still for a moment. Move it to choose, pinch to pick, make a fist to close."),
+        ];
+        for (int i = 0; i < gestures.Length; i++)
         {
-            if (Autostart.Set(!_autostart.On)) _autostart.On = !_autostart.On;
+            var card = new Card { Title = gestures[i].Title, Subtitle = gestures[i].Text, BackColor = Ui.Inspector };
+            card.SetBounds(x + (i % 2) * (cw + 18), 112 + (i / 2) * 150, cw, 132);
+            _handsPage.Controls.Add(card);
+        }
+        var menu = new Card
+        {
+            Title = "In the quick menu",
+            Subtitle = "Hide all  ·  Recentre  ·  Put here (the selected screen where you look)  ·  Next profile  ·  Close",
+            BackColor = Ui.Inspector,
         };
-        Place(_quit, _pageTune, "Quit XrShift", 198, y, 162, 32, PillButton.Looks.Ghost,
-            "Closes XrShift. Virtual monitors are removed, so windows on them come back to your real screen. Ctrl+Alt+Q.");
-        _quit.Click += (_, _) => QuitRequested?.Invoke();
-
-        AutoScaleDimensions = new SizeF(96f, 96f);
-        AutoScaleMode = AutoScaleMode.Dpi;
-
-        ShowPage(_pageScreen);
-        Refill();
-        LoadView();
+        menu.SetBounds(x, 112 + 300, cw * 2 + 18, 110);
+        _handsPage.Controls.Add(menu);
     }
 
-    DisplayOptics Optics => DisplayOptics.OnePro with { HorizontalFovDeg = _view.FovDeg };
+    void BuildGames()
+    {
+        PageTitle(_gamesPage, "Games", "Two ways to play with the glasses, and how to get the best out of each.");
+        int w = (ContentWidth - 72 - 18) / 2;
+        var plain = new Card
+        {
+            Title = "Plain screen",
+            Subtitle = "XrShift steps aside and the glasses become an ordinary monitor, straight from the graphics card: the smoothest way to play a game on the glasses. " +
+                       "Your extra monitors are removed while it is on; they come back when you switch it off. Ctrl+Alt+G.",
+            BackColor = Ui.Inspector,
+        };
+        plain.SetBounds(36, 112, w, 230);
+        var plainGo = new PillButton();
+        Place(plainGo, plain, "Turn plain screen on", 20, 160, 240, 42, PillButton.Looks.Accent, "Ctrl+Alt+G");
+        plainGo.Click += (_, _) => GameModeChanged?.Invoke(!_gameOn);
+        _gamesPage.Controls.Add(plain);
+
+        var vr = new Card
+        {
+            Title = "VR",
+            Subtitle = "Play SteamVR games seated: the glasses become a headset that follows your head as you look around (not as you lean or walk). " +
+                       "1 Glasses in Follow.  2 Start VR here.  3 Start the game from Steam.  Ctrl+Alt+V.",
+            BackColor = Ui.Inspector,
+        };
+        vr.SetBounds(36 + w + 18, 112, w, 230);
+        var vrGo = new PillButton();
+        Place(vrGo, vr, "Start VR", 20, 160, 240, 42, PillButton.Looks.Accent, "Ctrl+Alt+V");
+        vrGo.Click += (_, _) => VrModeChanged?.Invoke(!_vrOn);
+        _gamesPage.Controls.Add(vr);
+        _gameButtons = (plainGo, vrGo);
+
+        var tips = new Card
+        {
+            Title = "Tips",
+            Subtitle = "·  Set games to borderless windowed, at the size of the screen they are on (1920 x 1080 for the glasses and extra monitors).\n" +
+                       "·  VR games that work with a gamepad are the ones to start with, like No Man's Sky.\n" +
+                       "·  For depth in VR, switch the glasses to their 3D mode in their own menu first.\n" +
+                       "·  Look to point pauses while a game has the mouse, and picks up again when the pointer shows.\n" +
+                       "·  On a laptop with two graphics chips, keep the glasses on the USB-C port wired to the stronger one.",
+            BackColor = Ui.Inspector,
+        };
+        tips.SetBounds(36, 360, ContentWidth - 72, 220);
+        _gamesPage.Controls.Add(tips);
+    }
+
+    (PillButton Plain, PillButton Vr) _gameButtons;
+
+    void BuildSettings()
+    {
+        PageTitle(_settingsPage, "Settings", "Fine tuning, what the glasses show besides your screens, and the app itself.");
+        int w = (ContentWidth - 72 - 18) / 2;
+        var steady = new Card { Title = "Steadiness", BackColor = Ui.Inspector };
+        steady.SetBounds(36, 112, w, 250);
+        int y = 60;
+        _delay = Slider(steady, "Glasses delay", ViewSettings.MinDelayMs, ViewSettings.MaxDelayMs, 0.5f, 0, 1, " ms", true,
+            "Screens trail behind when you turn: raise it. They overshoot or jitter as you stop: lower it.", ref y,
+            v => ChangeView(s => s with { DelayMs = v }), w - 40);
+        _fov = Slider(steady, "View angle", ViewSettings.MinFovDeg, ViewSettings.MaxFovDeg, 0.1f, DisplayOptics.OnePro.HorizontalFovDeg, 1, "°", false,
+            "Screens follow your head a little as you turn: lower it. They move against your head: raise it.", ref y,
+            v => ChangeView(s => s with { FovDeg = v }), w - 40);
+        _level = Slider(steady, "Level", -ViewSettings.MaxLevelDeg, ViewSettings.MaxLevelDeg, 0.25f, 0, 2, "°", true,
+            "A screen off to the side tilts or climbs as you turn away from it: adjust until it stops.", ref y,
+            v => ChangeView(s => s with { LevelDeg = v }), w - 40);
+        _roll = Slider(steady, "Lean", -ViewSettings.MaxRollDeg, ViewSettings.MaxRollDeg, 0.25f, 0, 2, "°", true,
+            "Everything looks rotated: straighten it here.", ref y, v => ChangeView(s => s with { RollDeg = v }), w - 40);
+        _settingsPage.Controls.Add(steady);
+
+        var glasses = new Card { Title = "In the glasses", BackColor = Ui.Inspector };
+        glasses.SetBounds(36 + w + 18, 112, w, 250);
+        Place(_arrows, glasses, "Arrows to other screens", 20, 60, 230, 36, PillButton.Looks.Solid,
+            "Arrows at the edge of your view point the way to screens you are not facing.");
+        _arrows.Click += (_, _) => ChangeView(s => s with { EdgeArrows = !s.EdgeArrows });
+        Place(_status, glasses, "Status line", 20, 104, 230, 36, PillButton.Looks.Solid, "Keeps the line of numbers showing in the glasses. Ctrl+Alt+H.");
+        _status.Click += (_, _) => { _status.On = !_status.On; StatusPinnedChanged?.Invoke(_status.On); };
+        Place(_ruler, glasses, "Horizon ruler", 20, 148, 230, 36, PillButton.Looks.Solid, "A ruler all the way round at eye level, marked in degrees.");
+        _ruler.Click += (_, _) => ChangeView(s => s with { Ruler = !s.Ruler });
+        Place(_break, glasses, "Break reminder: off", 20, 192, 230, 36, PillButton.Looks.Solid,
+            "A line in the glasses every so often reminding you to look into the distance for 20 seconds. Click to change how often.");
+        _break.Click += (_, _) => ChangeView(s => s with { BreakMinutes = s.BreakMinutes switch { 0 => 20, 20 => 30, 30 => 45, 45 => 60, _ => 0 } });
+        _settingsPage.Controls.Add(glasses);
+
+        var app = new Card
+        {
+            Title = $"XrShift {Application.ProductVersion.Split('+')[0]}",
+            Subtitle = "Free and open source. Made with Claude (Anthropic's AI), shaped by real testing with XREAL One Pro glasses. Not made by XREAL.",
+            BackColor = Ui.Inspector,
+        };
+        app.SetBounds(36, 380, ContentWidth - 72, 168);
+        Place(_autostart, app, "Start with Windows", 20, 108, 200, 40, PillButton.Looks.Solid,
+            "Starts XrShift quietly when you sign in. It waits in the tray and brings your screens up when the glasses are plugged in.");
+        _autostart.On = Autostart.Enabled;
+        _autostart.Click += (_, _) => { if (Autostart.Set(!_autostart.On)) _autostart.On = !_autostart.On; };
+        Place(_github, app, "XrShift on GitHub", 232, 108, 200, 40, PillButton.Looks.Ghost, "Opens the project page: updates, the code and a place to report problems.");
+        _github.Click += (_, _) =>
+        {
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("https://github.com/skinger3/XrShift") { UseShellExecute = true }); }
+            catch (Exception) { }
+        };
+        Place(_quit, app, "Quit XrShift", 444, 108, 200, 40, PillButton.Looks.Ghost,
+            "Closes XrShift. Extra monitors are removed, so windows on them come back to your real screen. Ctrl+Alt+Q.");
+        _quit.Click += (_, _) => QuitRequested?.Invoke();
+        _settingsPage.Controls.Add(app);
+
+        var eyes = new Card
+        {
+            Title = "Without your glasses",
+            Subtitle = "Not wearing your glasses or contacts? Sharpening and extra contrast make text easier to read, and bigger screens help most. " +
+                       "For real sharpness the glasses take prescription lenses (inserts) from XREAL or an optician.",
+            BackColor = Ui.Inspector,
+        };
+        eyes.SetBounds(36, 566, ContentWidth - 72, 168);
+        int ey = 112;
+        _easy = Slider(eyes, "Sharpen text", 0, 100, 5, 0, 0, " %", false,
+            "Sharpens edges and adds contrast on every screen. 0 is off.", ref ey, v => ChangeView(s => s with { EasyReading = v / 100f }), 520);
+        Place(_bigger, eyes, "Make every screen bigger", 600, 108, 240, 40, PillButton.Looks.Solid,
+            "Every screen 25 % bigger, keeping the arrangement (Zoom on the Screens page). Ctrl+Alt+PgUp / PgDn from anywhere.");
+        _bigger.Click += (_, _) => ChangeView(s => s with { Zoom = MathF.Min(ViewSettings.MaxZoom, MathF.Round(s.Zoom * 1.25f * 20) / 20) });
+        _settingsPage.Controls.Add(eyes);
+    }
+
+    static void PageTitle(Control page, string title, string sub)
+    {
+        var t = new Label { Text = title, Font = Ui.Display(20f), ForeColor = Ui.Ink, BackColor = Color.Transparent, AutoSize = true };
+        t.Location = new Point(36, 26);
+        page.Controls.Add(t);
+        var s = new Label { Text = sub, Font = Ui.Text(10f), ForeColor = Ui.Muted, BackColor = Color.Transparent, AutoSize = true };
+        s.Location = new Point(38, 72);
+        page.Controls.Add(s);
+    }
+
+    void ShowSection(int index)
+    {
+        Control[] pages = [_homePage, _screensPage, _handsPage, _gamesPage, _settingsPage];
+        string[] titles = ["Home", "Screens", "Hands", "Games", "Settings"];
+        index = Math.Clamp(index, 0, pages.Length - 1);
+        for (int i = 0; i < pages.Length; i++) pages[i].Visible = i == index;
+        _rail.SelectedIndex = index;
+        _pageTitle = index == 1 ? "Screens" : "XrShift";
+        _profileBar.Visible = index == 1; // profiles are sets of screens: shown where the screens are
+        Invalidate(new Rectangle(Rail, 0, ContentWidth, TopBar));
+    }
+
+    void ShowInspector(System.Windows.Forms.Panel page)
+    {
+        _pageScreen.Visible = page == _pageScreen;
+        _pageFollow.Visible = page == _pageFollow;
+        _pageStationary.Visible = page == _pageStationary;
+        _tabScreen.On = page == _pageScreen;
+        _tabRoom.On = page != _pageScreen;
+    }
+
+    DisplayOptics Optics => DisplayOptics.OnePro with { HorizontalFovDeg = _glassesStationary ? _view.HeldFovDeg : _view.FovDeg };
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -418,27 +722,13 @@ internal sealed class SettingsWindow : Form
         Graphics g = e.Graphics;
         Ui.Smooth(g);
         float d = DeviceDpi / 96f;
-        // The wordmark: the name, and a small mark of a screen bending around a point.
-        using (var mark = new Pen(Ui.Accent, 2f * d))
-        {
-            g.DrawArc(mark, 22 * d, 20 * d, 24 * d, 24 * d, 200, 140);
-            using var dot = new SolidBrush(Ui.Accent);
-            g.FillEllipse(dot, 31.5f * d, 34 * d, 5 * d, 5 * d);
-        }
-        using (Font word = Ui.Display(15f))
+        using (Font title = Ui.Display(15f))
         using (var ink = new SolidBrush(Ui.Ink))
-            g.DrawString("XrShift", word, ink, 54 * d, 17 * d);
-        using var rule = new Pen(Ui.Line);
-        g.DrawLine(rule, 0, TopBar * d - 1, Width, TopBar * d - 1);
-    }
-
-    void ShowPage(System.Windows.Forms.Panel page)
-    {
-        foreach ((PillButton tab, System.Windows.Forms.Panel p) in new[] { (_tabScreen, _pageScreen), (_tabStationary, _pageStationary), (_tabSpace, _pageSpace), (_tabTune, _pageTune) })
-        {
-            tab.On = p == page;
-            p.Visible = p == page;
-        }
+            g.DrawString(_pageTitle, title, ink, (Rail + 26) * d, 19 * d);
+        // A fine line under the top bar, teal fading into violet.
+        var line = new RectangleF(Rail * d, TopBar * d - 2, (Width - Rail * d), 2);
+        using var glow = new System.Drawing.Drawing2D.LinearGradientBrush(line, Ui.Fade(Ui.Accent, 160), Ui.Fade(Ui.Violet, 60), 0f);
+        g.FillRectangle(glow, line);
     }
 
     // ---- called by the app -------------------------------------------------------------------
@@ -461,57 +751,71 @@ internal sealed class SettingsWindow : Form
 
     public void SetStatusPinned(bool pinned) => _status.On = pinned;
 
-    public void SetGameMode(bool on) => _game.On = on;
+    public void SetGameMode(bool on) { _gameOn = on; ShowModes(); }
 
-    public void SetVrMode(bool on) => _vr.On = on;
+    public void SetVrMode(bool on) { _vrOn = on; ShowModes(); }
 
     public void SetBlank(bool on) => _blank.On = on;
 
-    /// <summary>What hand tracking is doing, beside its switch.</summary>
-    // Hand tracking needs Google's MediaPipe in a folder of its own; it is set up only when asked for, here.
-    void OfferHandSetup()
-    {
-        string script = Path.Combine(AppContext.BaseDirectory, "hands", "setup.ps1");
-        if (!File.Exists(script)) { SetHandStatus("setup file missing: reinstall XrShift"); return; }
-        if (MessageBox.Show(this,
-                "Hand gestures need Google's MediaPipe hand tracker (open source, about 390 MB), kept in a folder of its own in your user profile.\n\nDownload and set it up now? A window shows the progress; it takes a minute or two.",
-                "XrShift - hand gestures", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
-        try
-        {
-            var start = new System.Diagnostics.ProcessStartInfo("powershell.exe") { UseShellExecute = true };
-            foreach (string a in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
-                         $"& '{script}'; Write-Host ''; Write-Host 'You can close this window and switch Hand gestures on.'; Read-Host 'Press Enter to close'" })
-                start.ArgumentList.Add(a);
-            System.Diagnostics.Process.Start(start);
-            SetHandStatus("setting up...");
-        }
-        catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
-        {
-            SetHandStatus("could not start the setup");
-        }
-    }
-
-    /// <summary>Which mode the glasses are in, as XrShift sees it; the page for it comes to the front.</summary>
+    /// <summary>Which mode the glasses are in, as XrShift sees it.</summary>
     public void SetGlassesMode(bool stationary)
     {
         _glassesStationary = stationary;
+        Refill(); // the room view draws for the angle in use
         _space.HeldFrame = stationary;
-        _stationary.Text = stationary ? "●  Stationary" : "Stationary";
-        _followMode.Text = stationary ? "Follow" : "●  Follow";
-        _modeNow.Text = stationary ? "● the glasses are in stationary mode now" : "○ the glasses are in follow mode now";
+        ShowFloorOrRoom();
+        _tabRoom.Text = stationary ? "Stationary options" : "Follow options";
+        if (!_pageScreen.Visible) ShowInspector(stationary ? _pageStationary : _pageFollow);
+        ShowModes();
         ShowViewToggles();
-        if (_pageScreen.Visible) return;
-        ShowPage(stationary ? _pageStationary : _pageSpace);
     }
 
-    /// <summary>Brings a page to the front by name: screen, stationary, follow or tune.</summary>
-    public void ShowPageNamed(string name) => ShowPage(name.ToLowerInvariant() switch
+    // The four modes: which one is on, what the buttons say, the chip at the top.
+    void ShowModes()
     {
-        "stationary" => _pageStationary,
-        "follow" => _pageSpace,
-        "tune" => _pageTune,
-        _ => _pageScreen,
-    });
+        bool follow = !_gameOn && !_vrOn && !_glassesStationary, stationary = !_gameOn && !_vrOn && _glassesStationary;
+        _cardFollow.Lit = follow;
+        _cardStationary.Lit = stationary;
+        _cardPlain.Lit = _gameOn && !_vrOn;
+        _cardVr.Lit = _vrOn;
+        foreach (Control c in new Control[] { _cardFollow, _cardStationary, _cardPlain, _cardVr }) c.Invalidate();
+        _game.Text = _gameOn && !_vrOn ? "Turn off" : "Turn on";
+        _game.Look = _gameOn && !_vrOn ? PillButton.Looks.Solid : PillButton.Looks.Accent;
+        _vr.Text = _vrOn ? "Stop VR" : "Start VR";
+        _vr.Look = _vrOn ? PillButton.Looks.Solid : PillButton.Looks.Accent;
+        if (_gameButtons.Plain is not null)
+        {
+            _gameButtons.Plain.Text = _gameOn && !_vrOn ? "Turn plain screen off" : "Turn plain screen on";
+            _gameButtons.Vr.Text = _vrOn ? "Stop VR" : "Start VR";
+        }
+        _modeChip.Text = _vrOn ? "●  VR" : _gameOn ? "●  Plain screen" : _glassesStationary ? "●  Stationary" : "●  Follow";
+        _modeChip.TextColour = _vrOn ? Color.FromArgb(240, 171, 252) : _gameOn ? Ui.Warn : _glassesStationary ? Ui.Violet : Ui.Accent;
+        _modeChip.Invalidate();
+    }
+
+    // In stationary mode the floor plan is shown unless the wearer asked for the 3D room.
+    void ShowFloorOrRoom()
+    {
+        _viewToggle.Visible = _glassesStationary;
+        _floor.Visible = _glassesStationary && _floorWanted;
+        _viewToggle.Text = _floor.Visible ? "3D view" : "Floor plan";
+        _viewToggle.BringToFront();
+    }
+
+    /// <summary>Brings a page to the front by name: home, screens, stationary, follow, hands, games or settings.</summary>
+    public void ShowPageNamed(string name)
+    {
+        switch (name.ToLowerInvariant())
+        {
+            case "home": ShowSection(0); break;
+            case "stationary": ShowSection(1); ShowInspector(_pageStationary); break;
+            case "follow": ShowSection(1); ShowInspector(_pageFollow); break;
+            case "hands": ShowSection(2); break;
+            case "games": ShowSection(3); break;
+            case "tune" or "settings": ShowSection(4); break;
+            default: ShowSection(1); ShowInspector(_pageScreen); break;
+        }
+    }
 
     /// <summary>The Glasses view button is on.</summary>
     public bool PreviewOn => _previewButton.On;
@@ -530,15 +834,19 @@ internal sealed class SettingsWindow : Form
         if (_handState.Text != text) _handState.Text = text;
     }
 
-    /// <summary>The line in the dock, e.g. how many virtual monitors there are.</summary>
+    /// <summary>A short line about the extra monitors, e.g. how many there are.</summary>
     public void SetVirtualNote(string text) => _virtualNote.Text = text;
 
-    /// <summary>The live numbers at the top right.</summary>
+    /// <summary>The live numbers at the top right, and the glasses' card on the home page.</summary>
     public void SetLive(string text, bool healthy)
     {
         if (_live.Text == text) return;
         _live.Text = text;
         _live.ForeColor = healthy ? Ui.Ink : Ui.Warn;
+        string mode = _vrOn ? "VR" : _gameOn ? "Plain screen" : _glassesStationary ? "Stationary" : "Follow";
+        _homeStatus.Text = healthy
+            ? $"Connected and tracking.\nMode: {mode}.\nGlasses: {text}.\n{_layout.Screens.Count(s => s.Visible)} screens shown{(_virtualNote.Text.Length > 0 ? ", " + _virtualNote.Text : "")}."
+            : $"{char.ToUpper(text[0]) + text[1..]}.\nPlug the glasses in, set Windows to Extend (Win+P), and XrShift takes it from there.";
     }
 
     /// <summary>Selects a screen, e.g. one the app has just added.</summary>
@@ -595,6 +903,29 @@ internal sealed class SettingsWindow : Form
         x += width + 4;
     }
 
+    // Hand tracking needs Google's MediaPipe in a folder of its own; it is set up only when asked for, here.
+    void OfferHandSetup()
+    {
+        string script = Path.Combine(AppContext.BaseDirectory, "hands", "setup.ps1");
+        if (!File.Exists(script)) { SetHandStatus("setup file missing: reinstall XrShift"); return; }
+        if (MessageBox.Show(this,
+                "Hand gestures need Google's MediaPipe hand tracker (open source, about 390 MB), kept in a folder of its own in your user profile.\n\nDownload and set it up now? A window shows the progress; it takes a minute or two.",
+                "XrShift - hand gestures", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        try
+        {
+            var start = new System.Diagnostics.ProcessStartInfo("powershell.exe") { UseShellExecute = true };
+            foreach (string a in new[] { "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
+                         $"& '{script}'; Write-Host ''; Write-Host 'You can close this window and switch Hand gestures on.'; Read-Host 'Press Enter to close'" })
+                start.ArgumentList.Add(a);
+            System.Diagnostics.Process.Start(start);
+            SetHandStatus("setting up...");
+        }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            SetHandStatus("could not start the setup");
+        }
+    }
+
     // ---- editing -----------------------------------------------------------------------------
 
     void Quietly(Action set)
@@ -614,6 +945,13 @@ internal sealed class SettingsWindow : Form
         ShowScreens();
         ShowToggles(changed);
         if (changed.Source != spec.Source) UpdateButtons();
+    }
+
+    void ChangeSize(float inches)
+    {
+        if (_selected is null || _layout.Find(_selected) is not { } spec) return;
+        (int w, int h) = PictureSize(spec);
+        Change(s => s.WithDiagonalInches(inches, w, h, Optics));
     }
 
     void ChangeView(Func<ViewSettings, ViewSettings> edit)
@@ -677,7 +1015,7 @@ internal sealed class SettingsWindow : Form
     }
 
     bool ShowsVirtual(string id) =>
-        CanAddMonitors && VirtualMonitors.IsVirtualId(_layout.Find(id)?.DisplayName);
+        (CanAddMonitors || VirtualMonitors.Installed) && VirtualMonitors.IsVirtualId(_layout.Find(id)?.DisplayName);
 
     void ShowSourceMenu()
     {
@@ -694,6 +1032,19 @@ internal sealed class SettingsWindow : Form
             menu.Items.Add(item);
         }
         menu.Show(_source, new Point(0, _source.Height));
+    }
+
+    void ShowSizesMenu()
+    {
+        if (_selected is null || _layout.Find(_selected) is not { } spec) return;
+        ContextMenuStrip menu = NewMenu();
+        foreach (int inches in TvSizes)
+        {
+            var item = new ToolStripMenuItem($"{inches}-inch screen") { ForeColor = Ui.Ink };
+            item.Click += (_, _) => { ChangeSize(inches); LoadSelected(); };
+            menu.Items.Add(item);
+        }
+        menu.Show(_sizes, new Point(0, _sizes.Height));
     }
 
     void ShowShapeMenu()
@@ -713,6 +1064,45 @@ internal sealed class SettingsWindow : Form
             menu.Items.Add(item);
         }
         menu.Show(_shape, new Point(0, _shape.Height));
+    }
+
+    // Extra monitors are real Windows desktops made by Parsec's free, signed Virtual Display Driver. It is set up
+    // only when asked for, here, with Windows' own installer (winget); Windows asks for permission.
+    void OfferMonitorSetup()
+    {
+        if (MessageBox.Show(this,
+                "Extra monitors are real Windows desktops: drag windows onto them, run your work desktop full screen on one and a game on another.\n\n" +
+                "Windows needs a small display driver for them. XrShift uses Parsec's free Virtual Display Driver (signed by Parsec). " +
+                "Its monitors exist only while XrShift runs, so none are ever left behind.\n\n" +
+                "Install it now? Windows will ask for permission. Afterwards, click Add monitor again.",
+                "XrShift - extra monitors", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+        try
+        {
+            var start = new System.Diagnostics.ProcessStartInfo("powershell.exe") { UseShellExecute = true };
+            foreach (string a in new[] { "-NoProfile", "-Command",
+                         "winget install --id Parsec.ParsecVDD -e --accept-package-agreements --accept-source-agreements; Write-Host ''; Write-Host 'Done. You can close this window and click Add monitor in XrShift.'; Read-Host 'Press Enter to close'" })
+                start.ArgumentList.Add(a);
+            System.Diagnostics.Process.Start(start);
+        }
+        catch (Exception e) when (e is System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            MessageBox.Show(this, "Could not start the installer: " + e.Message, "XrShift", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+    }
+
+    // Without an extra-desktop driver there is no real monitor to add: say so plainly instead of adding a dummy.
+    void ShowNoMonitorMenu()
+    {
+        ContextMenuStrip menu = NewMenu();
+        menu.Items.Add(new ToolStripMenuItem("Extra monitors need a free display driver") { Enabled = false });
+        var setUp = new ToolStripMenuItem("Set up extra monitors...") { ForeColor = Ui.Accent };
+        setUp.Click += (_, _) => OfferMonitorSetup();
+        menu.Items.Add(setUp);
+        menu.Items.Add(new ToolStripSeparator());
+        var test = new ToolStripMenuItem("Add a test picture (for trying out layouts)");
+        test.Click += (_, _) => AddScreen();
+        menu.Items.Add(test);
+        menu.Show(_add, new Point(0, -menu.PreferredSize.Height));
     }
 
     void ShowWindowMenu()
@@ -741,7 +1131,7 @@ internal sealed class SettingsWindow : Form
         {
             public override Color MenuItemSelected => Ui.AccentDeep;
             public override Color MenuItemBorder => Ui.Accent;
-            public override Color MenuBorder => Ui.Line;
+            public override Color MenuBorder => Ui.Rim;
             public override Color ToolStripDropDownBackground => Ui.Raised;
             public override Color ImageMarginGradientBegin => Ui.Raised;
             public override Color ImageMarginGradientMiddle => Ui.Raised;
@@ -769,13 +1159,14 @@ internal sealed class SettingsWindow : Form
             screens.Add(new SpatialScreen(spec, width, height, SourceLabel(spec), missing));
         }
         _space.Show(screens, _selected, Optics);
+        _floor.Show(screens, _selected, Optics);
     }
 
     void LoadSelected()
     {
         ScreenSpec? spec = _selected is null ? null : _layout.Find(_selected);
         bool has = spec is not null;
-        foreach (Control c in new Control[] { _name, _source, _side, _height, _size, _curve, _tilt, _depth, _visible })
+        foreach (Control c in new Control[] { _name, _source, _side, _height, _size, _depth, _turn, _curve, _tilt, _bright, _visible, _follows, _sizes })
             c.Enabled = has;
 
         _choices.Clear();
@@ -801,26 +1192,30 @@ internal sealed class SettingsWindow : Form
                 _choices.Add(current);
             }
             _source.Text = current.Text;
+            (int w, int h) = PictureSize(spec);
             _side.Value = -spec.YawDeg;
             _height.Value = spec.PitchDeg;
-            _size.Value = spec.Scale * 100f;
+            _size.Value = spec.DiagonalInches(w, h, Optics);
+            _depth.Value = spec.Distance * FeetPerMetre;
+            _turn.Value = spec.TurnDeg;
             _curve.Value = spec.CurveDeg;
             _tilt.Value = spec.TiltDeg;
-            _depth.Value = spec.Distance;
+            _bright.Value = spec.Brightness * 100f;
         });
         ShowToggles(spec);
         UpdateButtons();
     }
 
-    /// <summary>Shown, shape and refresh of the selected screen. Shape and refresh only mean something for a virtual monitor.</summary>
+    /// <summary>Shown, follows me, shape and refresh of the selected screen. Shape and refresh only mean something for an extra monitor.</summary>
     void ShowToggles(ScreenSpec? spec)
     {
         _visible.On = spec?.Visible ?? false;
         _visible.Text = spec is { Visible: false } ? "Hidden" : "Shown";
-        bool virtualMonitor = spec is not null && CanAddMonitors && VirtualMonitors.IsVirtualId(spec.DisplayName);
+        _follows.On = spec?.FollowsMe ?? false;
+        bool virtualMonitor = spec is not null && (CanAddMonitors || VirtualMonitors.Installed) && VirtualMonitors.IsVirtualId(spec.DisplayName);
         _shape.Enabled = _rate.Enabled = virtualMonitor;
         (string name, _, _, _) = Shapes.FirstOrDefault(s => spec is not null && s.Width == spec.PixelWidth && s.Height == spec.PixelHeight, Shapes[0]);
-        _shape.Text = virtualMonitor ? name : "Shape";
+        _shape.Text = virtualMonitor ? name : "Shape (extra monitors)";
         _rate.Text = virtualMonitor && spec!.RefreshHz >= 100 ? "120 Hz" : "60 Hz";
         _rate.On = virtualMonitor && spec!.RefreshHz >= 100;
     }
@@ -836,6 +1231,8 @@ internal sealed class SettingsWindow : Form
             _level.Value = _view.LevelDeg;
             _roll.Value = _view.RollDeg;
             _zoom.Value = _view.Zoom * 100f;
+            _held.Value = _view.HeldFovDeg;
+            _easy.Value = _view.EasyReading * 100f;
         });
         ShowViewToggles();
     }
@@ -843,16 +1240,17 @@ internal sealed class SettingsWindow : Form
     void ShowViewToggles()
     {
         _ruler.On = _view.Ruler;
+        _arrows.On = _view.EdgeArrows;
         _pointerOff.On = !_view.LookPointer;
         _pointerJump.On = _view.LookPointer && !_view.LookFollow;
         _pointerFollow.On = _view.LookPointer && _view.LookFollow;
         _focus.On = _view.LookFocus;
         _focus.Enabled = _view.LookPointer;
         _dim.On = _view.Dim;
-        _stationary.On = _glassesStationary;
-        _followMode.On = !_glassesStationary;
         _drift.On = _view.Follow;
-        _hands.On = _view.Hands && HandInput.Installed;
+        bool handsOn = _view.Hands && HandInput.Installed;
+        _hands.On = handsOn;
+        _hands.Text = handsOn ? "Hand gestures: on" : "Hand gestures: off";
         _break.On = _view.BreakMinutes > 0;
         _break.Text = _view.BreakMinutes > 0 ? $"Break reminder: every {_view.BreakMinutes} min" : "Break reminder: off";
     }
@@ -864,7 +1262,7 @@ internal sealed class SettingsWindow : Form
         DisplayInfo? d = _sources.FirstOrDefault(x => Same(x.Id, id));
         if (d is null) return "not connected";
         string size = spec.PixelWidth > 0 ? $"{spec.PixelWidth}×{spec.PixelHeight}" : $"{d.Bounds.Width}×{d.Bounds.Height}";
-        return VirtualMonitors.IsVirtual(d) ? $"virtual · {size}" : $"monitor · {size}";
+        return VirtualMonitors.IsVirtual(d) ? $"extra monitor · {size}" : $"monitor · {size}";
     }
 
     // ---- building blocks -------------------------------------------------------------------------
@@ -890,14 +1288,14 @@ internal sealed class SettingsWindow : Form
     }
 
     SliderRow Slider(Control page, string caption, float min, float max, float step, float reset, int decimals, string unit, bool fromZero,
-        string hint, ref int y, Action<float> changed)
+        string hint, ref int y, Action<float> changed, int width = InspectorWidth - 40)
     {
         var row = new SliderRow
         {
             Caption = caption, Min = min, Max = max, Step = step, ResetTo = reset, Decimals = decimals, Unit = unit,
             FromZero = fromZero, Hint = hint, Font = Font,
         };
-        row.SetBounds(20, y, InspectorWidth - 40, 34);
+        row.SetBounds(20, y, width, 34);
         row.Changed += changed;
         row.HintWanted += text => _hint.Text = text;
         row.MouseLeave += (_, _) => _hint.Text = _defaultHint;
@@ -931,7 +1329,7 @@ internal sealed class SettingsWindow : Form
     protected override void OnHandleCreated(EventArgs e)
     {
         base.OnHandleCreated(e);
-        // Windows 11: a dark title bar in the app's own colour, instead of a white strip on a dark window.
+        // Windows 11: a title bar in the app's own colour, instead of a white strip on a dark window.
         int dark = 1, caption = ColorRef(Ui.Back), border = ColorRef(Ui.Line), text = ColorRef(Ui.Ink);
         DwmSetWindowAttribute(Handle, 20, ref dark, sizeof(int));
         DwmSetWindowAttribute(Handle, 35, ref caption, sizeof(int));
@@ -957,4 +1355,16 @@ internal sealed class SettingsWindow : Form
 
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
+}
+
+/// <summary>A page with the aurora as its backdrop. Cards and labels on it show the aurora around their corners.</summary>
+internal sealed class AuroraPanel : System.Windows.Forms.Panel
+{
+    public AuroraPanel()
+    {
+        SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        BackColor = Ui.Back;
+    }
+
+    protected override void OnPaintBackground(PaintEventArgs e) => Ui.PaintAurora(e.Graphics, ClientRectangle);
 }
