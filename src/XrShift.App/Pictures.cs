@@ -149,7 +149,7 @@ internal static class Pictures
     /// <summary>A bot, cluster or widget: a glowing disc in the colour of its state, with its name underneath. Black is see-through.</summary>
     public static Bitmap Object(XrShift.Scene.SceneObject o)
     {
-        Color colour = o.State switch
+        Color colour = o.Offline ? Color.FromArgb(120, 126, 138) : o.State switch
         {
             XrShift.Scene.BotState.Working => Color.FromArgb(70, 140, 255),
             XrShift.Scene.BotState.NeedsYou => Color.FromArgb(255, 180, 40),
@@ -177,7 +177,9 @@ internal static class Pictures
             using Font name = Face(30, FontStyle.Bold);
             g.DrawString(o.Label, name, ink, new RectangleF(0, top + disc + 22, ObjectSize, 44), centred);
             using Font state = Face(22);
-            g.DrawString(o.State == XrShift.Scene.BotState.NeedsYou ? "needs you" : XrShift.Scene.SceneObject.StateName(o.State), state, ink, new RectangleF(0, top + disc + 62, ObjectSize, 30), centred);
+            string what = o.Offline ? "offline" : o.State == XrShift.Scene.BotState.NeedsYou ? "needs you" : XrShift.Scene.SceneObject.StateName(o.State);
+            // A bot on another PC says which one, so the wearer knows where an answer has to be typed.
+            g.DrawString(o.Pc.Length > 0 ? $"{what} Â· {o.Pc}" : what, state, ink, new RectangleF(0, top + disc + 62, ObjectSize, 30), centred);
         }
         return picture;
     }

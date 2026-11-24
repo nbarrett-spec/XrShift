@@ -443,12 +443,14 @@ internal static class LiveApp
             settings.Activate();
         }
 
+        Action relineDesktop = () => { };
         var saveTimer = new System.Windows.Forms.Timer(parts) { Interval = 700 };
         void Save()
         {
             saveTimer.Stop();
             if (!dirty) return;
             dirty = false;
+            relineDesktop(); // a screen may have been moved to the other side of another
             try
             {
                 LayoutStore.Save(workspace, stationary);
@@ -522,8 +524,11 @@ internal static class LiveApp
         Func<string, string, string?> tellBot = (_, _) => "Not ready yet.";
         Action listen = () => { };
         var host = new ControlHost(() => workspace, UseWorkspace, () => deck, UseDeck, id => openObject(id), (id, text) => tellBot(id, text));
-        using ControlApiServer? api = args.Contains("--api") || File.Exists(ApiFlag)
-            ? new ControlApiServer(line =>
+        // A trial window (--window, --seconds) may run beside the real app: it only has the API when asked, under
+        // its own name, so hooks and scripts always reach the real one.
+        bool trialRun = args.Contains("--window") || Program.Number(args, "--seconds", 0) > 0;
+        using ControlApiServer? api = args.Contains("--api") || (!trialRun && File.Exists(ApiFlag))
+            ? new ControlApiServer(ControlApi.PipeName + (trialRun ? ".Trial" : ""), line =>
             {
                 // Posted to the window thread and waited for here, never Control.Invoke: Invoke leaves a wait handle
                 // behind that blows up on the window thread when a session ends mid-call (unplugging the glasses
@@ -545,8 +550,23 @@ internal static class LiveApp
         if (api is not null) announceLayout = name => api.Publish(ControlApi.Event("layout.loaded", name));
         // A bot whose session has died must not go on looking busy: check every couple of seconds.
         var botTimer = new System.Windows.Forms.Timer(parts) { Interval = 2000 };
-        botTimer.Tick += (_, _) => UseDeck(deck.Sweep(BotProcess.Alive));
-        if (api is not null) botTimer.Start();
+        botTimer.Tick += (_, _) => UseDeck(deck.Sweep(BotProcess.Alive, DateTime.UtcNow));
+        // Bots on the wearer's other PCs: only if network.json sets it up, and only their state reports get in.
+        BotNetListener? net = null;
+        if (BotNetwork.Load() is { } network)
+        {
+            try
+            {
+                net = new BotNetListener(network, line =>
+                {
+                    try { window.BeginInvoke(() => ControlApi.Handle(line, host, out _)); }
+                    catch (InvalidOperationException) { } // the session has ended
+                });
+            }
+            catch (System.Net.Sockets.SocketException e) { Log.Line($"Not listening for bots on other PCs: {e.Message}"); }
+        }
+        using BotNetListener? netHeld = net;
+        if (api is not null || net is not null) botTimer.Start();
         settings.ProfileSelected += index => UseWorkspace(workspace.Select(index));
         settings.ProfileAddRequested += () => UseWorkspace(workspace.AddCopy());
         settings.ProfileRenameRequested += name => UseWorkspace(workspace.Rename(name));
@@ -1620,34 +1640,38 @@ internal static class LiveApp
         {
             if (!fullScreen || direct || gameMode || args.Contains("--keep-modes")) return;
             List<DisplayInfo> extra = now.Where(VirtualMonitors.IsVirtual).ToList();
-            DisplayInfo? main = now.FirstOrDefault(d => d.Primary && !d.IsGlasses);
+            ScreenSpec? ScreenOf(DisplayInfo d) => layout.Screens.FirstOrDefault(s => string.Equals(s.DisplayName, d.Id, StringComparison.OrdinalIgnoreCase));
+            float YawOf(DisplayInfo d) => ScreenOf(d)?.YawDeg ?? -90f;
+            // The screen everything is lined up around: the real monitor the wearer can see nearest straight ahead.
+            // Windows' main display is only the fallback: with a laptop open under a big monitor it is often the
+            // laptop's own panel, which may not even be shown in the room.
+            DisplayInfo? main = now.Where(d => !d.IsGlasses && !VirtualMonitors.IsVirtual(d) && ScreenOf(d) is { Visible: true })
+                    .OrderBy(d => MathF.Abs(YawOf(d))).FirstOrDefault()
+                ?? now.FirstOrDefault(d => d.Primary && !d.IsGlasses);
             if (extra.Count == 0 || main is null) return;
-            string set = string.Join("|", now.Select(d => d.Id).OrderBy(id => id, StringComparer.OrdinalIgnoreCase));
+            float mainYaw = YawOf(main) is var y && y > -90f ? y : 0f;
+            // Where each extra monitor goes: beside, above or below its neighbour, as the screens sit in the room.
+            // The glasses' own area goes below the main monitor, out of the way, and the other real monitors stay put.
+            var keepFree = now.Where(d => !d.IsGlasses && !VirtualMonitors.IsVirtual(d) && d.Id != main.Id).Select(d => d.Bounds).ToList();
+            DisplayInfo? glassesNow = target is { IsGlasses: true } ? now.FirstOrDefault(d => d.Id == targetId) : null;
+            if (glassesNow is not null) keepFree.Add(new Rectangle(main.Bounds.Left, main.Bounds.Bottom, glassesNow.Bounds.Width, glassesNow.Bounds.Height));
+            var planned = DesktopPlan.Place(main.Bounds, mainYaw, ScreenOf(main)?.PitchDeg ?? 0f,
+                extra.Select(d => new DesktopPlan.Screen(d.DeviceName, d.Bounds.Width, d.Bounds.Height, YawOf(d), ScreenOf(d)?.PitchDeg ?? 0f)).ToList(), keepFree);
+            List<(string, int, int)> places = [.. planned];
+            if (glassesNow is not null) places.Add((glassesNow.DeviceName, main.Bounds.Left, main.Bounds.Bottom));
+            // Done again whenever moving a screen in the room changes where its monitor belongs: otherwise the
+            // mouse keeps crossing where the screen used to be.
+            string set = main.Id + ">" + string.Join("|", places.Select(p => $"{p.Item1}@{p.Item2},{p.Item3}"));
             if (set == linedUpFor) return;
             linedUpFor = set;
-
-            float YawOf(DisplayInfo d) => layout.Screens.FirstOrDefault(s => string.Equals(s.DisplayName, d.Id, StringComparison.OrdinalIgnoreCase))?.YawDeg ?? -90f;
-            float mainYaw = YawOf(main) is var y && y > -90f ? y : 0f;
-            var places = new List<(string, int, int)>();
-            int left = main.Bounds.Left, right = main.Bounds.Right, top = main.Bounds.Top;
-            foreach (DisplayInfo d in extra.Where(d => YawOf(d) > mainYaw).OrderBy(YawOf)) // yaw + is left: nearest first
-            {
-                left -= d.Bounds.Width;
-                places.Add((d.DeviceName, left, top));
-            }
-            foreach (DisplayInfo d in extra.Where(d => YawOf(d) <= mainYaw).OrderByDescending(YawOf))
-            {
-                places.Add((d.DeviceName, right, top));
-                right += d.Bounds.Width;
-            }
-            if (target is { IsGlasses: true } && now.FirstOrDefault(d => d.Id == targetId) is { } glassesNow)
-                places.Add((glassesNow.DeviceName, main.Bounds.Left, main.Bounds.Bottom));
             bool already = places.All(p => now.FirstOrDefault(d => d.DeviceName == p.Item1) is { } d && d.Bounds.X == p.Item2 && d.Bounds.Y == p.Item3);
             if (already) return;
             Log.Line(DisplayModes.TryPlace(places, out string why)
                 ? $"Lined up {extra.Count} extra monitor(s) on the desktop to match the room."
                 : $"Could not line up the extra monitors: {why}");
         }
+
+        relineDesktop = () => { if (!window.IsDisposed) LineUpDesktops(Displays.List()); };
 
         void TuneVirtualMonitors()
         {

@@ -108,12 +108,20 @@ internal static class BotHook
                 ["params"] = new JsonObject { ["id"] = session, ["event"] = hookEvent, ["label"] = folder, ["pid"] = BotProcess.SessionAncestor() },
             };
 
-            using var pipe = new NamedPipeClientStream(".", ControlApi.PipeName, PipeDirection.InOut);
-            pipe.Connect(200);
-            using var writer = new StreamWriter(pipe);
-            writer.WriteLine(request.ToJsonString());
-            writer.Flush();
-            pipe.WaitForPipeDrain();
+            try
+            {
+                using var pipe = new NamedPipeClientStream(".", ControlApi.PipeName, PipeDirection.InOut);
+                pipe.Connect(200);
+                using var writer = new StreamWriter(pipe);
+                writer.WriteLine(request.ToJsonString());
+                writer.Flush();
+                pipe.WaitForPipeDrain();
+            }
+            catch (Exception e) when (e is IOException or TimeoutException)
+            {
+                // XrShift is not showing bots on this PC: the glasses may be on another one. Tell that one, if set up.
+                BotNetwork.Load()?.Forward(request);
+            }
         }
         catch (Exception e) when (e is IOException or TimeoutException or JsonException or UnauthorizedAccessException or InvalidOperationException) { }
         return 0;

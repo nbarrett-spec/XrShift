@@ -89,4 +89,31 @@ public class DeckTests
         Assert.Equal("b", deck.Nearest(-Deck.RowStepDeg + 1, Deck.RowPitchDeg - 2)!.Id);
         Assert.Null(deck.Nearest(60, 0));
     }
+
+    static readonly DateTime Noon = new(2026, 11, 24, 12, 0, 0, DateTimeKind.Utc);
+
+    [Fact]
+    public void ABotOnAnotherPcThatGoesQuietWhileWorkingShowsOfflineAndComesBackWhenItReports()
+    {
+        Deck deck = new Deck().Report("r1", "UserPromptSubmit", "abel", pc: "DESK", now: Noon);
+        Assert.Equal(("DESK", null, false), (deck.Find("r1")!.Pc, deck.Find("r1")!.Pid, deck.Find("r1")!.Offline));
+
+        // Its process cannot be seen from here, so a dead-process check must not touch it; only silence counts.
+        Assert.Same(deck, deck.Sweep(_ => false, Noon.AddMinutes(9)));
+        Deck quiet = deck.Sweep(_ => false, Noon.AddMinutes(11));
+        Assert.True(quiet.Find("r1")!.Offline);
+        Assert.Same(quiet, quiet.Sweep(_ => false, Noon.AddMinutes(30)));
+
+        Deck back = quiet.Report("r1", "PostToolUse", pc: "DESK", now: Noon.AddMinutes(31));
+        Assert.Equal((false, BotState.Working), (back.Find("r1")!.Offline, back.Find("r1")!.State));
+    }
+
+    [Fact]
+    public void ABotOnAnotherPcWaitingForAnAnswerOrFinishedIsNeverCalledOffline()
+    {
+        Deck waiting = new Deck().Report("r1", "UserPromptSubmit", pc: "DESK", now: Noon).Report("r1", "Notification", pc: "DESK", now: Noon);
+        Assert.Same(waiting, waiting.Sweep(_ => false, Noon.AddHours(5)));
+        Deck done = new Deck().Report("r2", "Stop", pc: "DESK", now: Noon);
+        Assert.Same(done, done.Sweep(_ => false, Noon.AddHours(5)));
+    }
 }

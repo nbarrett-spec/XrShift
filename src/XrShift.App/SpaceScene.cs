@@ -375,7 +375,7 @@ internal sealed class SpaceScene : IDisposable
                 _renderer.SetMesh(live.Item, PanelMesh.Build(panel), panel.Distance);
                 live.Panel = panel;
             }
-            if ((live.Object.Label, live.Object.State, live.Object.Badge, live.Object.Kind) != (o.Label, o.State, o.Badge, o.Kind))
+            if ((live.Object.Label, live.Object.State, live.Object.Badge, live.Object.Kind, live.Object.Pc, live.Object.Offline) != (o.Label, o.State, o.Badge, o.Kind, o.Pc, o.Offline))
             {
                 using Bitmap picture = Pictures.Object(o);
                 _renderer.SetPicture(live.Item, picture);
@@ -391,7 +391,7 @@ internal sealed class SpaceScene : IDisposable
         foreach (LiveObject live in _objects.Values)
         {
             live.Item.Visible = !blank;
-            live.Item.Tint = live.Object.State switch
+            live.Item.Tint = live.Object.Offline ? 0.6f : live.Object.State switch
             {
                 BotState.Working => 0.8f + 0.2f * MathF.Sin(_time * MathF.Tau / 2.4f),
                 BotState.NeedsYou => 0.65f + 0.35f * MathF.Sin(_time * MathF.Tau / 0.7f),

@@ -137,7 +137,9 @@ public static class ControlApi
                     // The bot bridge: a Claude Code hook event for one session. The rules live in Deck.Report.
                     if (Text(p, "id") is not { } session || Text(p, "event") is not { } hookEvent) return Error(id, InvalidParams, "bot.report needs params.id and params.event.");
                     int? pid = p!["pid"] is JsonValue v && v.TryGetValue(out int n) && n > 0 ? n : null;
-                    host.Use(host.Deck.Report(session, hookEvent, Text(p, "label"), pid));
+                    // A report that names a PC came over the network: that PC's process numbers mean nothing here.
+                    string? pc = Text(p, "pc");
+                    host.Use(host.Deck.Report(session, hookEvent, Text(p, "label"), pc is null ? pid : null, pc, DateTime.UtcNow));
                     result = new JsonObject { ["state"] = host.Deck.Find(session) is { } bot ? SceneObject.StateName(bot.State) : null };
                     break;
                 }
@@ -217,7 +219,8 @@ public static class ControlApi
                 ["kind"] = o.Kind,
                 ["label"] = o.Label,
                 ["position"] = new JsonObject { ["yawDeg"] = o.YawDeg, ["pitchDeg"] = o.PitchDeg, ["distance"] = o.Distance },
-                ["state"] = SceneObject.StateName(o.State),
+                ["state"] = o.Offline ? "offline" : SceneObject.StateName(o.State),
+                ["pc"] = o.Pc,
                 ["badge"] = o.Badge,
             });
         }

@@ -18,11 +18,15 @@ internal sealed class ControlApiServer : IDisposable
     readonly List<StreamWriter> _subscribers = [];
 
     /// <param name="handle">Answers one request line. Called from pipe threads: it must hop to the window thread itself.</param>
-    public ControlApiServer(Func<string, (string? Reply, bool Subscribe)> handle)
+    readonly string _pipeName;
+
+    /// <param name="pipeName">A trial window gets a name of its own, so it never takes requests meant for the real app.</param>
+    public ControlApiServer(string pipeName, Func<string, (string? Reply, bool Subscribe)> handle)
     {
         _handle = handle;
+        _pipeName = pipeName;
         _ = Task.Run(Accept);
-        Log.Line($@"Control API listening on \\.\pipe\{ControlApi.PipeName} (this user, this PC only).");
+        Log.Line($@"Control API listening on \\.\pipe\{pipeName} (this user, this PC only).");
     }
 
     /// <summary>Sends an event line to everyone who subscribed.</summary>
@@ -57,7 +61,7 @@ internal sealed class ControlApiServer : IDisposable
         {
             while (!_stop.IsCancellationRequested)
             {
-                NamedPipeServerStream pipe = NamedPipeServerStreamAcl.Create(ControlApi.PipeName, PipeDirection.InOut, MaxClients,
+                NamedPipeServerStream pipe = NamedPipeServerStreamAcl.Create(_pipeName,PipeDirection.InOut, MaxClients,
                     PipeTransmissionMode.Byte, PipeOptions.Asynchronous, BufferBytes, BufferBytes, security);
                 try { await pipe.WaitForConnectionAsync(_stop.Token); }
                 catch { pipe.Dispose(); throw; }

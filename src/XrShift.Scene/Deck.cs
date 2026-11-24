@@ -33,6 +33,12 @@ public sealed record SceneObject
     public bool Placed { get; init; }
     /// <summary>The process behind a bot, if known: when it is gone, so is the bot's session.</summary>
     public int? Pid { get; init; }
+    /// <summary>The PC a bot runs on when that is not this one; empty for a bot on this PC.</summary>
+    public string Pc { get; init; } = "";
+    /// <summary>When a bot on another PC last reported. This PC cannot see that bot's process, only how long it has been quiet.</summary>
+    public DateTime SeenAt { get; init; }
+    /// <summary>A bot on another PC that said it was working and then went quiet: shown as offline, never as still working.</summary>
+    public bool Offline { get; init; }
 
     /// <summary>How wide an object looks, in degrees.</summary>
     public const float SizeDeg = 7f;
@@ -69,6 +75,9 @@ public sealed record Deck
     /// <summary>Where objects that were not given a place line up: a row below eye level, filling outward from the middle.</summary>
     public const float RowPitchDeg = -20f, RowStepDeg = 9f;
 
+    /// <summary>How long a working bot on another PC may say nothing before it is shown as offline.</summary>
+    public static readonly TimeSpan RemoteQuiet = TimeSpan.FromMinutes(10);
+
     public IReadOnlyList<SceneObject> Objects { get; init; } = [];
 
     public SceneObject? Find(string id) => Objects.FirstOrDefault(o => o.Id == id);
@@ -87,7 +96,7 @@ public sealed record Deck
     /// What a Claude Code hook event does to the bot of that session. An event from a session not seen before
     /// makes its bot first, so a session that was already running when the app started still shows up.
     /// </summary>
-    public Deck Report(string id, string hookEvent, string? label = null, int? pid = null)
+    public Deck Report(string id, string hookEvent, string? label = null, int? pid = null, string? pc = null, DateTime now = default)
     {
         if (hookEvent == "SessionEnd") return Remove(id);
         SceneObject bot = Find(id) ?? new SceneObject { Id = id };
@@ -107,6 +116,9 @@ public sealed record Deck
             State = next ?? bot.State,
             Label = string.IsNullOrWhiteSpace(label) ? bot.Label : label.Trim(),
             Pid = pid ?? bot.Pid,
+            Pc = pc ?? bot.Pc,
+            SeenAt = string.IsNullOrEmpty(pc ?? bot.Pc) ? bot.SeenAt : now,
+            Offline = false,
         };
         return changed == Find(id) ? this : With(changed);
     }
@@ -115,12 +127,20 @@ public sealed record Deck
     /// Looks for bots whose process has gone. One that was busy or waiting has failed: it must never sit
     /// there looking as if it were still working. One that had nothing going on is simply removed.
     /// </summary>
-    public Deck Sweep(Func<int, bool> alive)
+    public Deck Sweep(Func<int, bool> alive, DateTime now = default)
     {
         List<SceneObject> next = [];
         bool changed = false;
         foreach (SceneObject o in Objects)
         {
+            // shortcut: a bot on another PC is judged by silence alone, so one tool call longer than RemoteQuiet shows as offline until it ends; have each PC report its own process check if that bites.
+            if (o.Pc.Length > 0)
+            {
+                bool quiet = o.State == BotState.Working && !o.Offline && now - o.SeenAt > RemoteQuiet;
+                changed |= quiet;
+                next.Add(quiet ? o with { Offline = true } : o);
+                continue;
+            }
             if (o.Pid is not { } pid || o.State == BotState.Failed || alive(pid)) { next.Add(o); continue; }
             changed = true;
             if (o.State is BotState.Working or BotState.NeedsYou) next.Add(o with { State = BotState.Failed });
