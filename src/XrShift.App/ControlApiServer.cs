@@ -87,7 +87,7 @@ internal sealed class ControlApiServer : IDisposable
             }
         }
         // The caller hung up, or the session's window has gone: either way this caller is finished.
-        catch (Exception e) when (e is IOException or OperationCanceledException or InvalidOperationException) { }
+        catch (Exception e) when (e is IOException or OperationCanceledException or InvalidOperationException or AggregateException) { }
         finally
         {
             lock (_subscribers) _subscribers.Remove(writer);
@@ -99,8 +99,11 @@ internal sealed class ControlApiServer : IDisposable
 }
 
 /// <summary>The live session, as the Control API sees it. Every member runs on the window thread.</summary>
-internal sealed class ControlHost(Func<Workspace> workspace, Action<Workspace> useWorkspace, Func<Deck> deck, Action<Deck> useDeck, Action<string> focus) : IControlHost
+internal sealed class ControlHost(Func<Workspace> workspace, Action<Workspace> useWorkspace, Func<Deck> deck, Action<Deck> useDeck, Action<string> focus, Func<string, string, string?> tell) : IControlHost
 {
+    public IReadOnlyList<string> Projects => [.. XrShift.App.Projects.Load().Keys];
+    public string? Spawn(string project) => XrShift.App.Projects.Spawn(project);
+    public string? Tell(string id, string text) => tell(id, text);
     public Workspace Workspace => workspace();
     public void Use(Workspace changed) => useWorkspace(changed);
     public Deck Deck => deck();

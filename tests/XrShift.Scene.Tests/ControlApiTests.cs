@@ -12,6 +12,10 @@ public class ControlApiTests : IControlHost
     Deck IControlHost.Deck => _deck;
     void IControlHost.Use(Deck changed) => _deck = changed;
     void IControlHost.Focus(string id) => _focused.Add(id);
+    readonly List<string> _spawned = [], _told = [];
+    IReadOnlyList<string> IControlHost.Projects => ["Abel platform", "Agritec"];
+    string? IControlHost.Spawn(string project) { if (project == "Agritec") return "Folder is missing."; _spawned.Add(project); return null; }
+    string? IControlHost.Tell(string id, string text) { _told.Add($"{id}: {text}"); return null; }
 
     Workspace _workspace = new Workspace()
         .WithLayout(new Layout().Add(new ScreenSpec { Name = "Laptop" }).Add(new ScreenSpec { Name = "Mail", Source = ScreenSpec.WindowSource("outlook", "Inbox"), Visible = false }))
@@ -129,5 +133,63 @@ public class ControlApiTests : IControlHost
         Assert.Equal("working", Call("""{"jsonrpc":"2.0","id":1,"method":"bot.report","params":{"id":"s1","event":"UserPromptSubmit","label":"abel","pid":4242}}""")
             .GetProperty("result").GetProperty("state").GetString());
         Assert.Equal(("abel", 4242), (_deck.Find("s1")!.Label, _deck.Find("s1")!.Pid));
+    }
+
+    string Say(string text) =>
+        Call($$$"""{"jsonrpc":"2.0","id":9,"method":"voice.say","params":{"text":"{{{text}}}"}}""").ToString();
+
+    [Fact]
+    public void SpokenCommandsDoWhatTheMatchingRequestsDo()
+    {
+        _deck = _deck.With(new SceneObject { Id = "b1", Label = "abel-builder-platform" }).With(new SceneObject { Id = "b2", Label = "Quotes" });
+        Call("""{"jsonrpc":"2.0","id":1,"method":"layout.save","params":{"name":"Build day"}}""");
+
+        Say("Load Sales Day.");
+        Assert.Equal("Sales day", _workspace.Current.Name);
+        Say("switch to the layout build day");
+        Assert.Equal("Build day", _workspace.Current.Name);
+
+        Say("hide the laptop");
+        Assert.False(_workspace.Current.Layout.Screens[0].Visible);
+        Say("show laptop");
+        Assert.True(_workspace.Current.Layout.Screens[0].Visible);
+
+        Say("open quotes");
+        Assert.Equal(["b2"], _focused);
+
+        Say("tell abel builder platform to run the tests and fix what fails");
+        Say("Ask Quotes to reply to Ben");
+        Assert.Equal(["b1: run the tests and fix what fails", "b2: reply to ben"], _told);
+
+        Say("new bot in abel platform");
+        Assert.Equal(["Abel platform"], _spawned);
+    }
+
+    [Theory]
+    [InlineData("open the pod bay doors", "Nothing by that name.")]
+    [InlineData("hide quotes", "No screen by that name.")]
+    [InlineData("load friday", "No layout by that name.")]
+    [InlineData("tell nobody to do it", "No bot by that name.")]
+    [InlineData("new bot in narnia", "No project by that name.")]
+    [InlineData("new bot in agritec", "Folder is missing.")]
+    [InlineData("make me a sandwich", "Try: open, hide, load, new bot in, or tell ... to ...")]
+    public void WhatWasNotUnderstoodIsSaidBackAndChangesNothing(string heard, string why)
+    {
+        _deck = _deck.With(new SceneObject { Id = "b2", Label = "Quotes" });
+        Workspace before = _workspace;
+        Assert.Contains(why, Say(heard));
+        Assert.Same(before, _workspace);
+        Assert.Empty(_focused);
+        Assert.Empty(_told);
+        Assert.Empty(_spawned);
+    }
+
+    [Fact]
+    public void ANameThatFitsTwoThingsIsNotGuessedAt()
+    {
+        _deck = _deck.With(new SceneObject { Id = "a", Label = "abel quotes" }).With(new SceneObject { Id = "b", Label = "abel orders" });
+        Assert.Contains("Nothing by that name.", Say("open abel"));
+        Say("open abel orders");
+        Assert.Equal(["b"], _focused);
     }
 }

@@ -411,11 +411,11 @@ internal static class LiveApp
         [
             (Keys.Q, "Q"), (Keys.S, "S"), (Keys.H, "H"), (Keys.G, "G"), (Keys.OemOpenBrackets, "["), (Keys.OemCloseBrackets, "]"),
             (Keys.OemMinus, "-"), (Keys.Oemplus, "="), (Keys.D1, "1"), (Keys.D2, "2"), (Keys.D3, "3"), (Keys.D4, "4"),
-            (Keys.M, "M"), (Keys.L, "L"), (Keys.B, "B"), (Keys.PageUp, "PgUp"), (Keys.PageDown, "PgDn"), (Keys.K, "K"), (Keys.P, "P"), (Keys.V, "V"), (Keys.O, "O"), (Keys.D, "D"),
+            (Keys.M, "M"), (Keys.L, "L"), (Keys.B, "B"), (Keys.PageUp, "PgUp"), (Keys.PageDown, "PgDn"), (Keys.K, "K"), (Keys.P, "P"), (Keys.V, "V"), (Keys.O, "O"), (Keys.D, "D"), (Keys.T, "T"),
         ];
         List<string> taken = otherKeys.Where(k => !window.AddHotKey(k.Key)).Select(k => k.Name).ToList();
         string recentreKey = recentreNames.Count > 0 ? $"Ctrl+Alt+{recentreNames[0]}" : "Space";
-        Log.Line($"Keys, from any program: {recentreKey} recentre, Ctrl+Alt+M mouse to where you look, Ctrl+Alt+L look-to-move on/off, Ctrl+Alt+B hide all, Ctrl+Alt+PgUp/PgDn zoom, Ctrl+Alt+K hand gestures, Ctrl+Alt+P pick up / set down a screen, Ctrl+Alt+O open the bot you look at, Ctrl+Alt+D sharp / 3D, Ctrl+Alt+S settings, Ctrl+Alt+Q quit, Ctrl+Alt+1-4 profiles, Ctrl+Alt+G game mode, Ctrl+Alt+H status line, Ctrl+Alt+[ ] glasses delay, Ctrl+Alt+- = view angle.");
+        Log.Line($"Keys, from any program: {recentreKey} recentre, Ctrl+Alt+M mouse to where you look, Ctrl+Alt+L look-to-move on/off, Ctrl+Alt+B hide all, Ctrl+Alt+PgUp/PgDn zoom, Ctrl+Alt+K hand gestures, Ctrl+Alt+P pick up / set down a screen, Ctrl+Alt+O open the bot you look at, Ctrl+Alt+D sharp / 3D, Ctrl+Alt+T talk, Ctrl+Alt+S settings, Ctrl+Alt+Q quit, Ctrl+Alt+1-4 profiles, Ctrl+Alt+G game mode, Ctrl+Alt+H status line, Ctrl+Alt+[ ] glasses delay, Ctrl+Alt+- = view angle.");
         if (taken.Count > 0)
             Log.Line($"Another program already owns Ctrl+Alt+{string.Join(", Ctrl+Alt+", taken)}; those only work with the glasses' window in front.");
 
@@ -516,13 +516,28 @@ internal static class LiveApp
             Publish();
         }
         Action<string> openObject = _ => { };
-        var host = new ControlHost(() => workspace, UseWorkspace, () => deck, UseDeck, id => openObject(id));
+        Func<string, string, string?> tellBot = (_, _) => "Not ready yet.";
+        Action listen = () => { };
+        var host = new ControlHost(() => workspace, UseWorkspace, () => deck, UseDeck, id => openObject(id), (id, text) => tellBot(id, text));
         using ControlApiServer? api = args.Contains("--api")
-            ? new ControlApiServer(line => window.Invoke(() =>
+            ? new ControlApiServer(line =>
             {
-                string? reply = ControlApi.Handle(line, host, out bool subscribe);
-                return (reply, subscribe);
-            }))
+                // Posted to the window thread and waited for here, never Control.Invoke: Invoke leaves a wait handle
+                // behind that blows up on the window thread when a session ends mid-call (unplugging the glasses
+                // while a bot hook was reporting did exactly that on 2026-11-24).
+                var done = new TaskCompletionSource<(string? Reply, bool Subscribe)>(TaskCreationOptions.RunContinuationsAsynchronously);
+                window.BeginInvoke(() =>
+                {
+                    try
+                    {
+                        string? reply = ControlApi.Handle(line, host, out bool subscribe);
+                        done.TrySetResult((reply, subscribe));
+                    }
+                    catch (Exception e) { done.TrySetException(e); } // back to the caller, not into the window's message loop
+                });
+                if (!done.Task.Wait(TimeSpan.FromSeconds(5))) throw new InvalidOperationException("The session ended before it answered.");
+                return done.Task.Result;
+            })
             : null;
         if (api is not null) announceLayout = name => api.Publish(ControlApi.Event("layout.loaded", name));
         // A bot whose session has died must not go on looking busy: check every couple of seconds.
@@ -1244,10 +1259,18 @@ internal static class LiveApp
                 : $"The glasses are in follow mode: profile {workspace.Current.Name}, {layout.Screens.Count} screens.");
         }
         settings.SetGlassesMode(false);
+        bool modeWarned = false;
         var modeTimer = new System.Windows.Forms.Timer(parts) { Interval = 250 };
         modeTimer.Tick += (_, _) =>
         {
             if (gameMode) return;
+            // Older glasses software (seen on a One Pro with 1.7.0) refuses the mode question. Then the app cannot
+            // know, assumes Follow, and must say so: in Anchor both the glasses and the app would steady the picture.
+            if (glassesControl.Mode is null && !modeWarned && clock.Elapsed.TotalSeconds > 6)
+            {
+                modeWarned = true;
+                Notice("These glasses do not report their mode. Set them to Follow in their own menu.", 12);
+            }
             bool anchored = glassesControl.Stationary ?? camera.Anchored;
             if (anchored != stationary) SwitchMode(anchored);
         };
@@ -1307,6 +1330,51 @@ internal static class LiveApp
             Notice(handle != IntPtr.Zero ? $"Opened {o.Label}" : $"{o.Label}: no window to open", 2);
         };
 
+        // Telling a bot something: its window comes forward and the words are typed into it, without Enter, so
+        // the wearer reads what was heard before sending it. Nothing is typed unless that window really has the keyboard.
+        tellBot = (id, text) =>
+        {
+            if (deck.Find(id) is not { Pid: { } pid } bot) return "That bot has no session to type into.";
+            IntPtr handle = BotProcess.WindowOf(pid);
+            if (handle == IntPtr.Zero) return "That bot has no window to type into.";
+            openObject(id);
+            var typeTimer = new System.Windows.Forms.Timer(parts) { Interval = 400 };
+            typeTimer.Tick += (_, _) =>
+            {
+                typeTimer.Stop();
+                typeTimer.Dispose();
+                if (WindowFinder.Foreground() != handle) { Notice($"Could not bring {bot.Label} forward; nothing was typed.", 4); return; }
+                // SendKeys reads + ^ % ~ ( ) { } [ ] as keys: wrap each so it is typed as itself.
+                SendKeys.Send(System.Text.RegularExpressions.Regex.Replace(text, @"[+^%~(){}\[\]]", "{$0}"));
+                Notice($"Typed to {bot.Label}. Press Enter to send.", 4);
+            };
+            typeTimer.Start();
+            return null;
+        };
+
+        // Push to talk (Ctrl+Alt+T): one spoken command, handled exactly as the same sentence sent to voice.say.
+        using var voice = new Voice();
+        listen = () => voice.Listen(new VoiceCommands.Known(layout.Screens, deck.Objects, workspace.Profiles.Select(p => p.Name).ToList(), host.Projects));
+        voice.Status += text => { try { window.BeginInvoke(() => Notice(text, 4)); } catch (InvalidOperationException) { } };
+        voice.Heard += text =>
+        {
+            try
+            {
+                window.BeginInvoke(() =>
+                {
+                    var request = new System.Text.Json.Nodes.JsonObject
+                    {
+                        ["jsonrpc"] = "2.0", ["id"] = 1, ["method"] = "voice.say",
+                        ["params"] = new System.Text.Json.Nodes.JsonObject { ["text"] = text },
+                    };
+                    string reply = ControlApi.Handle(request.ToJsonString(), host, out _) ?? "";
+                    string? problem = System.Text.Json.Nodes.JsonNode.Parse(reply)?["error"]?["message"]?.GetValue<string>();
+                    Notice(problem is null ? $"\"{text}\"" : $"\"{text}\": {problem}", 4);
+                });
+            }
+            catch (InvalidOperationException) { }
+        };
+
         void Act(Keys key)
         {
             switch (key)
@@ -1348,6 +1416,10 @@ internal static class LiveApp
                 case Keys.PageUp or Keys.PageDown when carried is not null && layout.Find(carried) is { } held:
                     layout = layout.With(Layout.Clamp(held with { Scale = held.Scale * (key == Keys.PageUp ? 1.06f : 1f / 1.06f) }));
                     Publish();
+                    return;
+                case Keys.T:
+                    Notice("Listening...", 5);
+                    listen();
                     return;
                 case Keys.D:
                     // Sharp: one picture, best for text. 3D: a picture per eye, so near things look near. The layout is the same in both.

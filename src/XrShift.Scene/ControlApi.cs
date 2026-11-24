@@ -12,6 +12,12 @@ public interface IControlHost
     void Use(Deck changed);
     /// <summary>Opens an object for the wearer, as looking at it and pressing the key does.</summary>
     void Focus(string id);
+    /// <summary>The projects a new bot can be started in, by name.</summary>
+    IReadOnlyList<string> Projects { get; }
+    /// <summary>Starts a new agent session in a project. Null when it started; otherwise why not.</summary>
+    string? Spawn(string project);
+    /// <summary>Hands a bot an instruction. Null when it was handed over; otherwise why not.</summary>
+    string? Tell(string id, string text);
 }
 
 /// <summary>
@@ -74,6 +80,40 @@ public static class ControlApi
                     host.Use(host.Deck.With(made));
                     result = new JsonObject { ["id"] = made.Id };
                     break;
+                }
+                case "object.update" when Text(p, "id") is { } screenId && host.Workspace.Current.Layout.Find(screenId) is { } screen:
+                {
+                    // A screen can only be shown or hidden from here; placing screens stays with the settings window.
+                    bool? show = Text(p, "state") switch { "visible" => true, "hidden" => false, _ => null };
+                    if (show is null) return Error(id, InvalidParams, "For a screen, state must be visible or hidden.");
+                    host.Use(host.Workspace.WithLayout(host.Workspace.Current.Layout.With(screen with { Visible = show.Value })));
+                    result = new JsonObject { ["id"] = screenId };
+                    break;
+                }
+                case "bot.spawn":
+                {
+                    if (Text(p, "project") is not { } project) return Error(id, InvalidParams, "bot.spawn needs params.project.");
+                    if (host.Spawn(project) is { } refused) return Error(id, InvalidParams, refused);
+                    result = new JsonObject { ["project"] = project };
+                    break;
+                }
+                case "bot.tell":
+                {
+                    if (Text(p, "id") is not { } bot || host.Deck.Find(bot) is null) return Error(id, InvalidParams, "No object with that id.");
+                    if (Text(p, "text") is not { } text) return Error(id, InvalidParams, "bot.tell needs params.text.");
+                    if (host.Tell(bot, text) is { } refused) return Error(id, InvalidParams, refused);
+                    result = new JsonObject { ["id"] = bot };
+                    break;
+                }
+                case "voice.say":
+                {
+                    // A sentence as if it had been spoken: what the microphone path sends, and a way to script it.
+                    if (Text(p, "text") is not { } heard) return Error(id, InvalidParams, "voice.say needs params.text.");
+                    var known = new VoiceCommands.Known(host.Workspace.Current.Layout.Screens, host.Deck.Objects, host.Workspace.Profiles.Select(x => x.Name).ToList(), host.Projects);
+                    if (VoiceCommands.Parse(heard, known, out string why) is not { } command) return Error(id, InvalidParams, why);
+                    command["id"] = id?.DeepClone();
+                    if (!wantsReply) command.Remove("id");
+                    return Handle(command.ToJsonString(), host, out subscribe);
                 }
                 case "object.update":
                 {

@@ -32,6 +32,7 @@ internal sealed class GlassesControl : IDisposable
 
     /// <summary>The glasses' mode as they last reported it, or null while it is not known.</summary>
     public int? Mode { get; private set; }
+    bool _modeLogged;
 
     /// <summary>The glasses are holding their picture still (stationary / Anchor).</summary>
     public bool? Stationary => Mode is { } m ? m is 0 or 3 : null; // 3 = their ultrawide, also held still
@@ -46,7 +47,14 @@ internal sealed class GlassesControl : IDisposable
             while (!ct.IsCancellationRequested)
             {
                 if (Paused) { Mode = null; Drop(); }
-                else Mode = ReadMode();
+                else
+                {
+                    int? read = ReadMode();
+                    // Said once per change, so the log shows which mode the glasses were really in (or that they would not say).
+                    if (read != Mode || !_modeLogged) Log.Line(read is { } m ? $"Glasses report mode {m} (0 Anchor, 1 Follow, 2 Side View, 3 UltraWide)." : "The glasses did not say which mode they are in; assuming Follow.");
+                    _modeLogged = true;
+                    Mode = read;
+                }
                 try { if (ct.WaitHandle.WaitOne(700)) return; } catch (ObjectDisposedException) { return; }
             }
         }) { IsBackground = true, Name = "Glasses control" };
