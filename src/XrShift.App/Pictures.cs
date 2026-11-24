@@ -144,6 +144,44 @@ internal static class Pictures
         return picture;
     }
 
+    public const int ObjectSize = 256;
+
+    /// <summary>A bot, cluster or widget: a glowing disc in the colour of its state, with its name underneath. Black is see-through.</summary>
+    public static Bitmap Object(XrShift.Scene.SceneObject o)
+    {
+        Color colour = o.State switch
+        {
+            XrShift.Scene.BotState.Working => Color.FromArgb(70, 140, 255),
+            XrShift.Scene.BotState.NeedsYou => Color.FromArgb(255, 180, 40),
+            XrShift.Scene.BotState.Done => Color.FromArgb(60, 200, 110),
+            XrShift.Scene.BotState.Failed => Color.FromArgb(235, 70, 70),
+            _ => Color.FromArgb(120, 126, 138),
+        };
+        Bitmap picture = NewPicture(ObjectSize, ObjectSize, out Graphics g);
+        using (g)
+        {
+            g.Clear(Color.Transparent);
+            const float disc = 132, left = (ObjectSize - disc) / 2f, top = 18;
+            using (var glow = new SolidBrush(Color.FromArgb(60, colour))) g.FillEllipse(glow, left - 14, top - 14, disc + 28, disc + 28);
+            using (var fill = new SolidBrush(colour)) g.FillEllipse(fill, left, top, disc, disc);
+            using var ink = new SolidBrush(Color.FromArgb(240, 243, 250));
+            using var dark = new SolidBrush(Color.FromArgb(10, 13, 20));
+            var centred = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
+            // In the disc: the badge if there is one, else what kind of thing this is when it is not a bot.
+            string inside = o.Badge.Length > 0 ? o.Badge : o.Kind == "bot" ? "" : o.Kind;
+            if (inside.Length > 0)
+            {
+                using Font small = Face(inside.Length <= 3 ? 54 : 26, FontStyle.Bold);
+                g.DrawString(inside, small, dark, new RectangleF(left, top, disc, disc), centred);
+            }
+            using Font name = Face(30, FontStyle.Bold);
+            g.DrawString(o.Label, name, ink, new RectangleF(0, top + disc + 22, ObjectSize, 44), centred);
+            using Font state = Face(22);
+            g.DrawString(o.State == XrShift.Scene.BotState.NeedsYou ? "needs you" : XrShift.Scene.SceneObject.StateName(o.State), state, ink, new RectangleF(0, top + disc + 62, ObjectSize, 30), centred);
+        }
+        return picture;
+    }
+
     static Bitmap NewPicture(int width, int height, out Graphics g)
     {
         var picture = new Bitmap(width, height, PixelFormat.Format32bppPArgb);

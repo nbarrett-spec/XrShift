@@ -3,9 +3,20 @@ using System.Text.Json.Nodes;
 
 namespace XrShift.Scene;
 
+/// <summary>The app, as the Control API sees it: what is in use right now, and how to change it.</summary>
+public interface IControlHost
+{
+    Workspace Workspace { get; }
+    void Use(Workspace changed);
+    Deck Deck { get; }
+    void Use(Deck changed);
+    /// <summary>Opens an object for the wearer, as looking at it and pressing the key does.</summary>
+    void Focus(string id);
+}
+
 /// <summary>
 /// The Control API's protocol: one JSON-RPC 2.0 request per line in, one response line out. It knows nothing
-/// about pipes or windows, so it can be tested on its own; the app carries the lines and owns the workspace.
+/// about pipes or windows, so it can be tested on its own; the app carries the lines and owns the state.
 /// </summary>
 public static class ControlApi
 {
@@ -14,11 +25,9 @@ public static class ControlApi
     const int ParseError = -32700, InvalidRequest = -32600, MethodNotFound = -32601, InvalidParams = -32602;
 
     /// <param name="line">One request.</param>
-    /// <param name="workspace">The workspace in use right now.</param>
-    /// <param name="use">Switches the app to a changed workspace.</param>
     /// <param name="subscribe">True if this caller asked for the event stream.</param>
     /// <returns>The response line, or null for a request that wants none (no id).</returns>
-    public static string? Handle(string line, Func<Workspace> workspace, Action<Workspace> use, out bool subscribe)
+    public static string? Handle(string line, IControlHost host, out bool subscribe)
     {
         subscribe = false;
         JsonNode? id = null;
@@ -27,35 +36,71 @@ public static class ControlApi
             if (JsonNode.Parse(line) is not JsonObject request) return Error(null, InvalidRequest, "A request must be a JSON object.");
             bool wantsReply = request.TryGetPropertyValue("id", out id);
             id = id?.DeepClone();
-            if (request["method"] is not JsonValue methodNode || !methodNode.TryGetValue(out string? method))
-                return Error(id, InvalidRequest, "A request needs a method.");
+            if (Text(request, "method") is not { } method) return Error(id, InvalidRequest, "A request needs a method.");
+            JsonObject? p = request["params"] as JsonObject;
 
             JsonNode result;
             switch (method)
             {
                 case "scene.list":
-                    result = SceneList(workspace());
+                    result = SceneList(host.Workspace, host.Deck);
                     break;
                 case "layout.load":
                 {
-                    if (Name(request) is not { } name) return Error(id, InvalidParams, "layout.load needs params.name.");
-                    Workspace now = workspace();
-                    if (now.IndexOf(name) is not { } at) return Error(id, InvalidParams, $"No layout named '{name}'.");
-                    use(now.Select(at));
-                    result = new JsonObject { ["name"] = workspace().Current.Name };
+                    if (Text(p, "name") is not { } name) return Error(id, InvalidParams, "layout.load needs params.name.");
+                    if (host.Workspace.IndexOf(name) is not { } at) return Error(id, InvalidParams, $"No layout named '{name}'.");
+                    host.Use(host.Workspace.Select(at));
+                    result = new JsonObject { ["name"] = host.Workspace.Current.Name };
                     break;
                 }
                 case "layout.save":
                 {
-                    if (Name(request) is not { } name) return Error(id, InvalidParams, "layout.save needs params.name.");
-                    use(workspace().SaveAs(name));
-                    result = new JsonObject { ["name"] = workspace().Current.Name };
+                    if (Text(p, "name") is not { } name) return Error(id, InvalidParams, "layout.save needs params.name.");
+                    host.Use(host.Workspace.SaveAs(name));
+                    result = new JsonObject { ["name"] = host.Workspace.Current.Name };
                     break;
                 }
                 case "events.subscribe":
                     subscribe = true;
                     result = new JsonObject { ["subscribed"] = true };
                     break;
+                case "object.create":
+                {
+                    string kind = Text(p, "kind") ?? "bot";
+                    if (!SceneObject.Kinds.Contains(kind)) return Error(id, InvalidParams, $"kind must be one of: {string.Join(", ", SceneObject.Kinds)}.");
+                    var made = new SceneObject { Kind = kind, Label = kind };
+                    if (Text(p, "id") is { } wanted) made = made with { Id = wanted };
+                    if (!TryChange(ref made, p, out string? why)) return Error(id, InvalidParams, why!);
+                    host.Use(host.Deck.With(made));
+                    result = new JsonObject { ["id"] = made.Id };
+                    break;
+                }
+                case "object.update":
+                {
+                    if (Text(p, "id") is not { } target || host.Deck.Find(target) is not { } found) return Error(id, InvalidParams, "No object with that id.");
+                    if (!TryChange(ref found, p, out string? why)) return Error(id, InvalidParams, why!);
+                    host.Use(host.Deck.With(found));
+                    result = new JsonObject { ["id"] = found.Id };
+                    break;
+                }
+                case "object.remove":
+                case "object.focus":
+                {
+                    if (Text(p, "id") is not { } target || host.Deck.Find(target) is null) return Error(id, InvalidParams, "No object with that id.");
+                    if (method == "object.remove") host.Use(host.Deck.Remove(target));
+                    else host.Focus(target);
+                    result = new JsonObject { ["id"] = target };
+                    break;
+                }
+                case "bot.report":
+                {
+                    // The bot bridge: a Claude Code hook event for one session. The rules live in Deck.Report.
+                    if (Text(p, "id") is not { } session || Text(p, "event") is not { } hookEvent) return Error(id, InvalidParams, "bot.report needs params.id and params.event.");
+                    int? pid = p!["pid"] is JsonValue v && v.TryGetValue(out int n) && n > 0 ? n : null;
+                    host.Use(host.Deck.Report(session, hookEvent, Text(p, "label"), pid));
+                    result = new JsonObject { ["state"] = host.Deck.Find(session) is { } bot ? SceneObject.StateName(bot.State) : null };
+                    break;
+                }
                 default:
                     return Error(id, MethodNotFound, $"Unknown method '{method}'.");
             }
@@ -67,21 +112,50 @@ public static class ControlApi
         }
     }
 
-    /// <summary>A line telling subscribers that something happened, e.g. <c>layout.loaded</c>.</summary>
-    public static string Event(string type, string name) =>
+    /// <summary>A line telling subscribers that a layout was loaded.</summary>
+    public static string Event(string type, string name) => Event(type, "name", name);
+
+    /// <summary>A line telling subscribers something about one object, e.g. <c>object.activated</c>.</summary>
+    public static string ObjectEvent(string type, string id) => Event(type, "id", id);
+
+    static string Event(string type, string key, string value) =>
         new JsonObject
         {
             ["jsonrpc"] = "2.0",
             ["method"] = "event",
-            ["params"] = new JsonObject { ["type"] = type, ["name"] = name },
+            ["params"] = new JsonObject { ["type"] = type, [key] = value },
         }.ToJsonString();
 
-    static string? Name(JsonObject request) =>
-        request["params"] is JsonObject p && p["name"] is JsonValue v && v.TryGetValue(out string? name) && !string.IsNullOrWhiteSpace(name)
-            ? name.Trim()
-            : null;
+    static string? Text(JsonObject? from, string key) =>
+        from?[key] is JsonValue v && v.TryGetValue(out string? text) && !string.IsNullOrWhiteSpace(text) ? text.Trim() : null;
 
-    static JsonObject SceneList(Workspace workspace)
+    /// <summary>Applies the optional state, label, badge and position of a create or update request.</summary>
+    static bool TryChange(ref SceneObject o, JsonObject? p, out string? why)
+    {
+        why = null;
+        if (p is null) return true;
+        if (p["state"] is not null)
+        {
+            if (SceneObject.ParseState(Text(p, "state")) is not { } state) { why = "state must be one of: idle, working, needs_you, done, failed."; return false; }
+            o = o with { State = state };
+        }
+        if (Text(p, "label") is { } label) o = o with { Label = label };
+        if (p["badge"] is JsonValue b && b.TryGetValue(out string? badge)) o = o with { Badge = badge ?? "" };
+        if (p["position"] is JsonObject at)
+        {
+            float Number(string key, float otherwise) => at[key] is JsonValue n && n.TryGetValue(out float f) && float.IsFinite(f) ? f : otherwise;
+            o = o with
+            {
+                YawDeg = Math.Clamp(Number("yawDeg", o.YawDeg), -180f, 180f),
+                PitchDeg = Math.Clamp(Number("pitchDeg", o.PitchDeg), -80f, 80f),
+                Distance = Math.Clamp(Number("distance", o.Distance), 0.3f, 10f),
+                Placed = true,
+            };
+        }
+        return true;
+    }
+
+    static JsonObject SceneList(Workspace workspace, Deck deck)
     {
         var objects = new JsonArray();
         foreach (ScreenSpec s in workspace.Current.Layout.Screens)
@@ -93,6 +167,18 @@ public static class ControlApi
                 ["label"] = s.Name,
                 ["position"] = new JsonObject { ["yawDeg"] = s.YawDeg, ["pitchDeg"] = s.PitchDeg, ["distance"] = s.Distance },
                 ["state"] = s.Visible ? "visible" : "hidden",
+            });
+        }
+        foreach (SceneObject o in deck.Objects)
+        {
+            objects.Add(new JsonObject
+            {
+                ["id"] = o.Id,
+                ["kind"] = o.Kind,
+                ["label"] = o.Label,
+                ["position"] = new JsonObject { ["yawDeg"] = o.YawDeg, ["pitchDeg"] = o.PitchDeg, ["distance"] = o.Distance },
+                ["state"] = SceneObject.StateName(o.State),
+                ["badge"] = o.Badge,
             });
         }
         return new JsonObject

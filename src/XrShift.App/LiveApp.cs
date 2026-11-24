@@ -12,7 +12,7 @@ internal static class LiveApp
     const float DegToRad = MathF.PI / 180f;
 
     /// <summary>What the drawing thread should show. Replaced whole by the window thread; never changed in place.</summary>
-    sealed record Snapshot(Layout Layout, IReadOnlyList<DisplayInfo> Sources, IReadOnlyDictionary<string, IntPtr> Windows, ViewSettings View, bool StatusPinned, bool Blank);
+    sealed record Snapshot(Layout Layout, IReadOnlyList<DisplayInfo> Sources, IReadOnlyDictionary<string, IntPtr> Windows, ViewSettings View, bool StatusPinned, bool Blank, Deck Deck);
 
     sealed class Shared
     {
@@ -352,12 +352,13 @@ internal static class LiveApp
         // Pinned windows that are open right now. Found here, on the window thread, never on the drawing thread.
         IReadOnlyDictionary<string, IntPtr> pinned = WindowFinder.Resolve(layout, new Dictionary<string, IntPtr>(), search: true);
         bool blank = false;
-        var shared = new Shared { Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank) };
+        Deck deck = new(); // bots, clusters and widgets: they live while the app runs and are not saved
+        var shared = new Shared { Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck) };
         Action afterPublish = () => { };
         void Publish()
         {
             pinned = WindowFinder.Resolve(layout, pinned, search: false);
-            shared.Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank);
+            shared.Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck);
             afterPublish();
         }
 
@@ -409,11 +410,11 @@ internal static class LiveApp
         [
             (Keys.Q, "Q"), (Keys.S, "S"), (Keys.H, "H"), (Keys.G, "G"), (Keys.OemOpenBrackets, "["), (Keys.OemCloseBrackets, "]"),
             (Keys.OemMinus, "-"), (Keys.Oemplus, "="), (Keys.D1, "1"), (Keys.D2, "2"), (Keys.D3, "3"), (Keys.D4, "4"),
-            (Keys.M, "M"), (Keys.L, "L"), (Keys.B, "B"), (Keys.PageUp, "PgUp"), (Keys.PageDown, "PgDn"), (Keys.K, "K"), (Keys.P, "P"), (Keys.V, "V"),
+            (Keys.M, "M"), (Keys.L, "L"), (Keys.B, "B"), (Keys.PageUp, "PgUp"), (Keys.PageDown, "PgDn"), (Keys.K, "K"), (Keys.P, "P"), (Keys.V, "V"), (Keys.O, "O"),
         ];
         List<string> taken = otherKeys.Where(k => !window.AddHotKey(k.Key)).Select(k => k.Name).ToList();
         string recentreKey = recentreNames.Count > 0 ? $"Ctrl+Alt+{recentreNames[0]}" : "Space";
-        Log.Line($"Keys, from any program: {recentreKey} recentre, Ctrl+Alt+M mouse to where you look, Ctrl+Alt+L look-to-move on/off, Ctrl+Alt+B hide all, Ctrl+Alt+PgUp/PgDn zoom, Ctrl+Alt+K hand gestures, Ctrl+Alt+P pick up / set down a screen, Ctrl+Alt+S settings, Ctrl+Alt+Q quit, Ctrl+Alt+1-4 profiles, Ctrl+Alt+G game mode, Ctrl+Alt+H status line, Ctrl+Alt+[ ] glasses delay, Ctrl+Alt+- = view angle.");
+        Log.Line($"Keys, from any program: {recentreKey} recentre, Ctrl+Alt+M mouse to where you look, Ctrl+Alt+L look-to-move on/off, Ctrl+Alt+B hide all, Ctrl+Alt+PgUp/PgDn zoom, Ctrl+Alt+K hand gestures, Ctrl+Alt+P pick up / set down a screen, Ctrl+Alt+O open the bot you look at, Ctrl+Alt+S settings, Ctrl+Alt+Q quit, Ctrl+Alt+1-4 profiles, Ctrl+Alt+G game mode, Ctrl+Alt+H status line, Ctrl+Alt+[ ] glasses delay, Ctrl+Alt+- = view angle.");
         if (taken.Count > 0)
             Log.Line($"Another program already owns Ctrl+Alt+{string.Join(", Ctrl+Alt+", taken)}; those only work with the glasses' window in front.");
 
@@ -507,14 +508,26 @@ internal static class LiveApp
             announceLayout(workspace.Current.Name);
         }
         // The Control API, off unless asked for: other programs on this PC list the scene and switch layouts.
+        void UseDeck(Deck changed)
+        {
+            if (ReferenceEquals(changed, deck)) return;
+            deck = changed;
+            Publish();
+        }
+        Action<string> openObject = _ => { };
+        var host = new ControlHost(() => workspace, UseWorkspace, () => deck, UseDeck, id => openObject(id));
         using ControlApiServer? api = args.Contains("--api")
             ? new ControlApiServer(line => window.Invoke(() =>
             {
-                string? reply = ControlApi.Handle(line, () => workspace, UseWorkspace, out bool subscribe);
+                string? reply = ControlApi.Handle(line, host, out bool subscribe);
                 return (reply, subscribe);
             }))
             : null;
         if (api is not null) announceLayout = name => api.Publish(ControlApi.Event("layout.loaded", name));
+        // A bot whose session has died must not go on looking busy: check every couple of seconds.
+        var botTimer = new System.Windows.Forms.Timer(parts) { Interval = 2000 };
+        botTimer.Tick += (_, _) => UseDeck(deck.Sweep(BotProcess.Alive));
+        if (api is not null) botTimer.Start();
         settings.ProfileSelected += index => UseWorkspace(workspace.Select(index));
         settings.ProfileAddRequested += () => UseWorkspace(workspace.AddCopy());
         settings.ProfileRenameRequested += name => UseWorkspace(workspace.Rename(name));
@@ -1282,6 +1295,17 @@ internal static class LiveApp
             }
         };
 
+        // Opening a bot: its session's window comes to the front, a finished bot stops being news, a dead one is cleared.
+        openObject = id =>
+        {
+            if (deck.Find(id) is not { } o) return;
+            IntPtr handle = o.Pid is { } pid ? BotProcess.WindowOf(pid) : IntPtr.Zero;
+            UseDeck(deck.Opened(id));
+            if (handle != IntPtr.Zero) WindowFinder.Activate(handle);
+            api?.Publish(ControlApi.ObjectEvent("object.activated", id));
+            Notice(handle != IntPtr.Zero ? $"Opened {o.Label}" : $"{o.Label}: no window to open", 2);
+        };
+
         void Act(Keys key)
         {
             switch (key)
@@ -1324,6 +1348,16 @@ internal static class LiveApp
                     layout = layout.With(Layout.Clamp(held with { Scale = held.Scale * (key == Keys.PageUp ? 1.06f : 1f / 1.06f) }));
                     Publish();
                     return;
+                case Keys.O:
+                {
+                    // The bot being looked at; failing that, one that is waiting for the wearer.
+                    float zoom = view.Zoom > 0.01f ? view.Zoom : 1f; // bots are not zoomed with the screens
+                    SceneObject? target = GazeAngles() is { } at ? deck.Nearest(at.Yaw * zoom, at.Pitch * zoom) : null;
+                    target ??= deck.Objects.FirstOrDefault(o => o.State == BotState.NeedsYou);
+                    if (target is null) Notice("No bot there. Look at one and press Ctrl+Alt+O.", 3);
+                    else openObject(target.Id);
+                    return;
+                }
                 case Keys.B:
                     blank = !blank;
                     settings.SetBlank(blank);
@@ -1602,6 +1636,7 @@ internal static class LiveApp
 
             DisplayOptics optics = shared.HoldHead ? DisplayOptics.OnePro with { HorizontalFovDeg = now.View.HeldFovDeg } : OpticsOf(now.View);
             scene.Apply(now.Layout, now.Sources, now.Windows, optics);
+            scene.Apply(now.Deck);
             scene.Update();
             scene.RulerVisible = now.View.Ruler;
             scene.OverlayVisible = overlayNow;

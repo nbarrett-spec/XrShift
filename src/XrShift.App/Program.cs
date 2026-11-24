@@ -15,6 +15,7 @@ internal static class Program
     static int Main(string[] args)
     {
         CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+        if (args.Contains("--bot-hook")) return BotHook.Run(); // before anything that could print or open a window
         Log.Start();
         if (args.Contains("--help") || args.Contains("-h")) return Usage();
 
@@ -110,7 +111,8 @@ internal static class Program
               --no-capture               stand-in pictures instead of live monitors
               --no-settings              do not open the settings window at start (Ctrl+Alt+S opens it)
               --api                      let other programs on this PC list the scene and switch layouts (pipe ArWorkspace.Api)
-              --free-cursor             let the mouse pointer wander onto the glasses' own desktop area
+              --bot-hook                 for a Claude Code hook: pass the hook event on standard input to the running app and exit
+              --free-cursor            let the mouse pointer wander onto the glasses' own desktop area
               --keep-modes               leave virtual monitors' resolution and refresh rate alone
               --fov D                    horizontal view angle of the glasses in degrees (default 50.7, or what you last tuned)
               --delay MS                 how long the glasses take to show a frame, in milliseconds (default 16.5, or what you last tuned)

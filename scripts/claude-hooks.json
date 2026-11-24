@@ -1,0 +1,11 @@
+{
+  "_readme": "Merge the 'hooks' block into %USERPROFILE%\\.claude\\settings.json so every Claude Code session shows up as a bot. Change the path if XrShift lives somewhere else. The app must be running with --api; when it is not, the hook does nothing and takes about a quarter of a second. PostToolUse is what turns a bot from 'needs you' back to 'working' after you approve something; leave it out and that bot stays amber until it finishes.",
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "\"C:/Users/natha/source/XrShift/dist/XrShift/XrShift.exe\" --bot-hook" }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "\"C:/Users/natha/source/XrShift/dist/XrShift/XrShift.exe\" --bot-hook" }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "\"C:/Users/natha/source/XrShift/dist/XrShift/XrShift.exe\" --bot-hook" }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "\"C:/Users/natha/source/XrShift/dist/XrShift/XrShift.exe\" --bot-hook" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "\"C:/Users/natha/source/XrShift/dist/XrShift/XrShift.exe\" --bot-hook" }] }],
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "\"C:/Users/natha/source/XrShift/dist/XrShift/XrShift.exe\" --bot-hook" }] }]
+  }
+}

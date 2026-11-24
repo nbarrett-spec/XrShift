@@ -97,3 +97,13 @@ internal sealed class ControlApiServer : IDisposable
 
     public void Dispose() => _stop.Cancel();
 }
+
+/// <summary>The live session, as the Control API sees it. Every member runs on the window thread.</summary>
+internal sealed class ControlHost(Func<Workspace> workspace, Action<Workspace> useWorkspace, Func<Deck> deck, Action<Deck> useDeck, Action<string> focus) : IControlHost
+{
+    public Workspace Workspace => workspace();
+    public void Use(Workspace changed) => useWorkspace(changed);
+    public Deck Deck => deck();
+    public void Use(Deck changed) => useDeck(changed);
+    public void Focus(string id) => focus(id);
+}

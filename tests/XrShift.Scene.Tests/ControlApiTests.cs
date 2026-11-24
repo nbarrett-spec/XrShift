@@ -3,15 +3,23 @@ using XrShift.Scene;
 
 namespace XrShift.Scene.Tests;
 
-public class ControlApiTests
+public class ControlApiTests : IControlHost
 {
+    Deck _deck = new();
+    readonly List<string> _focused = [];
+    Workspace IControlHost.Workspace => _workspace;
+    void IControlHost.Use(Workspace changed) => _workspace = changed;
+    Deck IControlHost.Deck => _deck;
+    void IControlHost.Use(Deck changed) => _deck = changed;
+    void IControlHost.Focus(string id) => _focused.Add(id);
+
     Workspace _workspace = new Workspace()
         .WithLayout(new Layout().Add(new ScreenSpec { Name = "Laptop" }).Add(new ScreenSpec { Name = "Mail", Source = ScreenSpec.WindowSource("outlook", "Inbox"), Visible = false }))
         .Rename("Sales day");
 
     JsonElement Call(string line, out bool subscribe)
     {
-        string? reply = ControlApi.Handle(line, () => _workspace, w => _workspace = w, out subscribe);
+        string? reply = ControlApi.Handle(line, this, out subscribe);
         return JsonDocument.Parse(reply!).RootElement;
     }
 
@@ -77,7 +85,49 @@ public class ControlApiTests
     [Fact]
     public void ARequestWithoutAnIdGetsNoReply()
     {
-        Assert.Null(ControlApi.Handle("""{"jsonrpc":"2.0","method":"layout.save","params":{"name":"Quiet"}}""", () => _workspace, w => _workspace = w, out _));
+        Assert.Null(ControlApi.Handle("""{"jsonrpc":"2.0","method":"layout.save","params":{"name":"Quiet"}}""", this, out _));
         Assert.Equal("Quiet", _workspace.Current.Name);
+    }
+
+    [Fact]
+    public void CreatesUpdatesFocusesAndRemovesAnObject()
+    {
+        string id = Call("""{"jsonrpc":"2.0","id":1,"method":"object.create","params":{"kind":"bot","label":"Quotes","position":{"yawDeg":30,"pitchDeg":-10}}}""")
+            .GetProperty("result").GetProperty("id").GetString()!;
+        SceneObject made = Assert.Single(_deck.Objects);
+        Assert.Equal(("Quotes", BotState.Idle, 30f, -10f), (made.Label, made.State, made.YawDeg, made.PitchDeg));
+
+        Call($$$"""{"jsonrpc":"2.0","id":2,"method":"object.update","params":{"id":"{{{id}}}","state":"needs_you","badge":"2"}}""");
+        Assert.Equal((BotState.NeedsYou, "2", 30f), (_deck.Find(id)!.State, _deck.Find(id)!.Badge, _deck.Find(id)!.YawDeg));
+
+        JsonElement listed = Call("""{"jsonrpc":"2.0","id":3,"method":"scene.list"}""").GetProperty("result").GetProperty("objects").EnumerateArray().Last();
+        Assert.Equal(("bot", "needs_you"), (listed.GetProperty("kind").GetString(), listed.GetProperty("state").GetString()));
+
+        Call($$$"""{"jsonrpc":"2.0","id":4,"method":"object.focus","params":{"id":"{{{id}}}"}}""");
+        Assert.Equal([id], _focused);
+
+        Call($$$"""{"jsonrpc":"2.0","id":5,"method":"object.remove","params":{"id":"{{{id}}}"}}""");
+        Assert.Empty(_deck.Objects);
+    }
+
+    [Theory]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"object.create","params":{"kind":"dragon"}}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"object.create","params":{"state":"napping"}}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"object.update","params":{"id":"missing","state":"done"}}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"object.focus","params":{"id":"missing"}}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"bot.report","params":{"id":"s1"}}""")]
+    public void BadObjectRequestsAreRefused(string line)
+    {
+        Assert.Equal(-32602, Call(line).GetProperty("error").GetProperty("code").GetInt32());
+        Assert.Empty(_deck.Objects);
+        Assert.Empty(_focused);
+    }
+
+    [Fact]
+    public void AHookReportMakesAndMovesABot()
+    {
+        Assert.Equal("working", Call("""{"jsonrpc":"2.0","id":1,"method":"bot.report","params":{"id":"s1","event":"UserPromptSubmit","label":"abel","pid":4242}}""")
+            .GetProperty("result").GetProperty("state").GetString());
+        Assert.Equal(("abel", 4242), (_deck.Find("s1")!.Label, _deck.Find("s1")!.Pid));
     }
 }

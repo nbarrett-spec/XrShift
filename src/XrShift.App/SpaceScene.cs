@@ -340,6 +340,67 @@ internal sealed class SpaceScene : IDisposable
 
     bool _blank;
 
+    sealed class LiveObject
+    {
+        public required SceneObject Object;
+        public required SceneItem Item;
+        public required Panel Panel;
+    }
+
+    readonly Dictionary<string, LiveObject> _objects = [];
+    Deck? _deck;
+    float _time;
+
+    /// <summary>Makes the scene match the deck: bots, clusters and widgets as discs in the room. Costs nothing when called again with the same deck.</summary>
+    public void Apply(Deck deck)
+    {
+        if (ReferenceEquals(deck, _deck)) return;
+        _deck = deck;
+        foreach (string gone in _objects.Keys.Where(k => deck.Find(k) is null).ToList())
+        {
+            _renderer.Remove(_objects[gone].Item);
+            _objects.Remove(gone);
+        }
+        foreach (SceneObject o in deck.Objects)
+        {
+            Panel panel = o.ToPanel();
+            if (!_objects.TryGetValue(o.Id, out LiveObject? live))
+            {
+                using Bitmap picture = Pictures.Object(o);
+                _objects[o.Id] = new LiveObject { Object = o, Item = _renderer.Add(PanelMesh.Build(panel), picture, distance: panel.Distance), Panel = panel };
+                continue;
+            }
+            if (live.Panel != panel)
+            {
+                _renderer.SetMesh(live.Item, PanelMesh.Build(panel), panel.Distance);
+                live.Panel = panel;
+            }
+            if ((live.Object.Label, live.Object.State, live.Object.Badge, live.Object.Kind) != (o.Label, o.State, o.Badge, o.Kind))
+            {
+                using Bitmap picture = Pictures.Object(o);
+                _renderer.SetPicture(live.Item, picture);
+            }
+            live.Object = o;
+        }
+    }
+
+    /// <summary>Once per frame: a working bot pulses slowly, one that needs the wearer pulses fast, an idle one is dim.</summary>
+    void Pulse(float seconds, bool blank)
+    {
+        _time += seconds;
+        foreach (LiveObject live in _objects.Values)
+        {
+            live.Item.Visible = !blank;
+            live.Item.Tint = live.Object.State switch
+            {
+                BotState.Working => 0.8f + 0.2f * MathF.Sin(_time * MathF.Tau / 2.4f),
+                BotState.NeedsYou => 0.65f + 0.35f * MathF.Sin(_time * MathF.Tau / 0.7f),
+                BotState.Idle => 0.6f,
+                _ => 1f,
+            };
+        }
+    }
+
     /// <summary>
     /// Once per frame: hides every screen while <paramref name="blank"/> (the glasses show the room through
     /// black), and with <paramref name="dim"/> darkens the screens the wearer is not looking at, fading over
@@ -348,6 +409,7 @@ internal sealed class SpaceScene : IDisposable
     public void Look(System.Numerics.Quaternion head, bool dim, bool blank, float seconds, float easyReading = 0)
     {
         _blank = blank;
+        Pulse(seconds, blank);
         foreach (LiveScreen screen in _screens.Values)
         {
             // Reading without glasses: sharper edges and a little more contrast on every screen.
@@ -381,18 +443,26 @@ internal sealed class SpaceScene : IDisposable
     public void PointToHiddenScreens(System.Numerics.Quaternion head, DisplayOptics optics, bool show)
     {
         var hints = new List<(float AngleDeg, string Name)>();
-        if (show && !_blank)
+        if (!_blank)
         {
             var toView = System.Numerics.Quaternion.Conjugate(head);
             float halfX = optics.HorizontalFovDeg / 2f, halfY = optics.VerticalFovDeg / 2f;
-            foreach (LiveScreen screen in _screens.Values)
+            void Hint(Panel panel, string name)
             {
-                if (!screen.Shown || screen.Spec.FollowsMe || screen.Panel is not { } panel) continue;
                 System.Numerics.Vector3 v = System.Numerics.Vector3.Transform(panel.Centre, toView);
                 float across = MathF.Atan2(v.X, -v.Z) * 180f / MathF.PI, up = MathF.Atan2(v.Y, MathF.Sqrt(v.X * v.X + v.Z * v.Z)) * 180f / MathF.PI;
                 float halfW = panel.AngularWidthDeg / 2f;
-                if (MathF.Abs(across) < halfX + halfW * 0.5f && MathF.Abs(up) < halfY) continue; // at least half in view
-                hints.Add((MathF.Atan2(up, across) * 180f / MathF.PI, screen.Spec.Name));
+                if (MathF.Abs(across) < halfX + halfW * 0.5f && MathF.Abs(up) < halfY) return; // at least half in view
+                hints.Add((MathF.Atan2(up, across) * 180f / MathF.PI, name));
+            }
+            foreach (LiveScreen screen in _screens.Values)
+            {
+                if (show && screen.Shown && !screen.Spec.FollowsMe && screen.Panel is { } panel) Hint(panel, screen.Spec.Name);
+            }
+            // A bot waiting for the wearer always gets an arrow, whatever the setting for screens says.
+            foreach (LiveObject live in _objects.Values)
+            {
+                if (live.Object.State == BotState.NeedsYou) Hint(live.Panel, $"{live.Object.Label} needs you");
             }
         }
         _edges.Visible = hints.Count > 0;
