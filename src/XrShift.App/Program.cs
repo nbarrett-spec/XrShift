@@ -110,7 +110,8 @@ internal static class Program
               --keep-monitors            do not add or remove virtual monitors when starting, quitting or switching profile
               --no-capture               stand-in pictures instead of live monitors
               --no-settings              do not open the settings window at start (Ctrl+Alt+S opens it)
-              --api                      let other programs on this PC list the scene and switch layouts (pipe ArWorkspace.Api)
+              --api                      let other programs on this PC list the scene, drive bots and switch layouts (pipe ArWorkspace.Api);
+                                         the tray menu remembers this choice for every start
               --stereo                   start in 3D: a picture per eye, side by side, for the glasses' 3D mode (Ctrl+Alt+D switches)
               --bot-hook                for a Claude Code hook: pass the hook event on standard input to the running app and exit
               --free-cursor            let the mouse pointer wander onto the glasses' own desktop area

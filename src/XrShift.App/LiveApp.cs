@@ -108,6 +108,9 @@ internal static class LiveApp
     /// <summary>The session that just ended created virtual monitors and expects them taken away.</summary>
     static bool s_ownsMonitors;
 
+    /// <summary>A file in the settings folder that says the Control API should be on, as --api does for one run.</summary>
+    static string ApiFlag => Path.Combine(TrackingConfig.Folder, "api-on");
+
     /// <summary>What to do when the app is started a second time: the running copy shows itself.</summary>
     static volatile Action? s_show;
     static readonly EventWaitHandle s_showSignal = new(false, EventResetMode.AutoReset, @"Local\XrShift.Show");
@@ -519,7 +522,7 @@ internal static class LiveApp
         Func<string, string, string?> tellBot = (_, _) => "Not ready yet.";
         Action listen = () => { };
         var host = new ControlHost(() => workspace, UseWorkspace, () => deck, UseDeck, id => openObject(id), (id, text) => tellBot(id, text));
-        using ControlApiServer? api = args.Contains("--api")
+        using ControlApiServer? api = args.Contains("--api") || File.Exists(ApiFlag)
             ? new ControlApiServer(line =>
             {
                 // Posted to the window thread and waited for here, never Control.Invoke: Invoke leaves a wait handle
@@ -590,6 +593,15 @@ internal static class LiveApp
         using var tray = new NotifyIcon { Icon = AppIcon.Value, Text = "XrShift", Visible = true };
         using var menu = new ContextMenuStrip();
         menu.Items.Add("Settings", null, (_, _) => ShowSettings());
+        // The Control API (bots, scripts) is off unless asked for. This remembers the choice, so a start from the
+        // Start menu or with Windows has it too. Read at the start of a session, hence "from the next start".
+        var apiItem = new ToolStripMenuItem("Bots and Control API (from the next start)") { Checked = File.Exists(ApiFlag), CheckOnClick = true };
+        apiItem.CheckedChanged += (_, _) =>
+        {
+            try { if (apiItem.Checked) File.WriteAllText(ApiFlag, ""); else File.Delete(ApiFlag); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log.Line($"Could not save the Control API choice: {e.Message}"); }
+        };
+        menu.Items.Add(apiItem);
         menu.Items.Add($"Recentre ({recentreKey})", null, (_, _) => { lock (gate) recenter = true; });
         menu.Items.Add("Plain screen / game mode (Ctrl+Alt+G)", null, (_, _) => setGameMode(!gameMode));
         s_show = () => window.BeginInvoke(ShowSettings);
