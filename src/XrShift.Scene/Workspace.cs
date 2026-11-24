@@ -42,6 +42,27 @@ public sealed record Workspace
         return this with { Profiles = [.. Profiles, new Profile { Name = chosen, Layout = copy }], Active = Profiles.Count };
     }
 
+    /// <summary>Where the profile of this name is, ignoring case, or null if there is none.</summary>
+    public int? IndexOf(string name)
+    {
+        for (int i = 0; i < Profiles.Count; i++)
+            if (string.Equals(Profiles[i].Name, name.Trim(), StringComparison.OrdinalIgnoreCase)) return i;
+        return null;
+    }
+
+    /// <summary>
+    /// Saves the arrangement in use under a name and switches to it: a new profile, or over the one that
+    /// already has that name.
+    /// </summary>
+    public Workspace SaveAs(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return this;
+        if (IndexOf(name) is not { } at) return AddCopy(name);
+        if (at == Math.Clamp(Active, 0, Profiles.Count - 1)) return this;
+        Workspace copied = AddCopy(name); // gives the screens new identities, as any copy gets
+        return this with { Profiles = Profiles.Select((p, i) => i == at ? p with { Layout = copied.Current.Layout } : p).ToList(), Active = at };
+    }
+
     /// <summary>Removes the profile in use. The last one cannot be removed.</summary>
     public Workspace RemoveCurrent()
     {

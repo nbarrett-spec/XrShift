@@ -1,0 +1,99 @@
+using System.IO.Pipes;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using XrShift.Scene;
+
+namespace XrShift.App;
+
+/// <summary>
+/// Carries Control API lines over a named pipe (<c>\\.\pipe\ArWorkspace.Api</c>). Only started with
+/// <c>--api</c>. Only this Windows user may connect, and never from another machine.
+/// </summary>
+internal sealed class ControlApiServer : IDisposable
+{
+    const int MaxClients = 8, BufferBytes = 64 * 1024;
+
+    readonly Func<string, (string? Reply, bool Subscribe)> _handle;
+    readonly CancellationTokenSource _stop = new();
+    readonly List<StreamWriter> _subscribers = [];
+
+    /// <param name="handle">Answers one request line. Called from pipe threads: it must hop to the window thread itself.</param>
+    public ControlApiServer(Func<string, (string? Reply, bool Subscribe)> handle)
+    {
+        _handle = handle;
+        _ = Task.Run(Accept);
+        Log.Line($@"Control API listening on \\.\pipe\{ControlApi.PipeName} (this user, this PC only).");
+    }
+
+    /// <summary>Sends an event line to everyone who subscribed.</summary>
+    public void Publish(string line)
+    {
+        // Never on the caller's thread: that is the window thread, and a subscriber that has stopped reading
+        // must not freeze the app. Chained so events arrive in the order they happened.
+        // shortcut: one stuck subscriber with a full buffer delays events to the others; give each its own queue if that ever shows.
+        lock (_subscribers) _sending = _sending.ContinueWith(_ => Send(line), TaskScheduler.Default);
+    }
+
+    Task _sending = Task.CompletedTask;
+
+    void Send(string line)
+    {
+        StreamWriter[] to;
+        lock (_subscribers) to = [.. _subscribers];
+        foreach (StreamWriter writer in to)
+        {
+            try { lock (writer) writer.WriteLine(line); }
+            catch (Exception e) when (e is IOException or ObjectDisposedException) { lock (_subscribers) _subscribers.Remove(writer); }
+        }
+    }
+
+    async Task Accept()
+    {
+        var security = new PipeSecurity();
+        security.AddAccessRule(new PipeAccessRule(WindowsIdentity.GetCurrent().User!, PipeAccessRights.FullControl, AccessControlType.Allow));
+        // Named pipes can be reached over the network by default; this one cannot.
+        security.AddAccessRule(new PipeAccessRule(new SecurityIdentifier(WellKnownSidType.NetworkSid, null), PipeAccessRights.FullControl, AccessControlType.Deny));
+        try
+        {
+            while (!_stop.IsCancellationRequested)
+            {
+                NamedPipeServerStream pipe = NamedPipeServerStreamAcl.Create(ControlApi.PipeName, PipeDirection.InOut, MaxClients,
+                    PipeTransmissionMode.Byte, PipeOptions.Asynchronous, BufferBytes, BufferBytes, security);
+                try { await pipe.WaitForConnectionAsync(_stop.Token); }
+                catch { pipe.Dispose(); throw; }
+                _ = Task.Run(() => Serve(pipe));
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException)
+        {
+            // Most likely all client slots are taken or another copy owns the pipe. The app carries on without the API.
+            Log.Line($"Control API stopped: {e.Message}");
+        }
+    }
+
+    async Task Serve(NamedPipeServerStream pipe)
+    {
+        var writer = new StreamWriter(pipe) { AutoFlush = true };
+        try
+        {
+            using var reader = new StreamReader(pipe);
+            while (await reader.ReadLineAsync(_stop.Token) is { } line)
+            {
+                if (line.Length == 0) continue;
+                (string? reply, bool subscribe) = _handle(line);
+                if (subscribe) lock (_subscribers) _subscribers.Add(writer);
+                if (reply is not null) lock (writer) writer.WriteLine(reply);
+            }
+        }
+        // The caller hung up, or the session's window has gone: either way this caller is finished.
+        catch (Exception e) when (e is IOException or OperationCanceledException or InvalidOperationException) { }
+        finally
+        {
+            lock (_subscribers) _subscribers.Remove(writer);
+            pipe.Dispose();
+        }
+    }
+
+    public void Dispose() => _stop.Cancel();
+}

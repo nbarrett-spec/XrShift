@@ -109,7 +109,8 @@ internal static class Program
               --keep-monitors            do not add or remove virtual monitors when starting, quitting or switching profile
               --no-capture               stand-in pictures instead of live monitors
               --no-settings              do not open the settings window at start (Ctrl+Alt+S opens it)
-              --free-cursor              let the mouse pointer wander onto the glasses' own desktop area
+              --api                      let other programs on this PC list the scene and switch layouts (pipe ArWorkspace.Api)
+              --free-cursor             let the mouse pointer wander onto the glasses' own desktop area
               --keep-modes               leave virtual monitors' resolution and refresh rate alone
               --fov D                    horizontal view angle of the glasses in degrees (default 50.7, or what you last tuned)
               --delay MS                 how long the glasses take to show a frame, in milliseconds (default 16.5, or what you last tuned)

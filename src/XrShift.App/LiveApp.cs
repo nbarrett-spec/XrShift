@@ -493,6 +493,7 @@ internal static class LiveApp
 
         // Switching, adding, renaming and removing profiles all end the same way: show the one now in use.
         Action<string> matchVirtual = _ => { };
+        Action<string> announceLayout = _ => { };
         void UseWorkspace(Workspace changed)
         {
             if (ReferenceEquals(changed, workspace)) return;
@@ -503,7 +504,17 @@ internal static class LiveApp
             settings.SetLayout(layout, sources);
             Touch(showOverlay: true);
             matchVirtual("Profile " + workspace.Current.Name);
+            announceLayout(workspace.Current.Name);
         }
+        // The Control API, off unless asked for: other programs on this PC list the scene and switch layouts.
+        using ControlApiServer? api = args.Contains("--api")
+            ? new ControlApiServer(line => window.Invoke(() =>
+            {
+                string? reply = ControlApi.Handle(line, () => workspace, UseWorkspace, out bool subscribe);
+                return (reply, subscribe);
+            }))
+            : null;
+        if (api is not null) announceLayout = name => api.Publish(ControlApi.Event("layout.loaded", name));
         settings.ProfileSelected += index => UseWorkspace(workspace.Select(index));
         settings.ProfileAddRequested += () => UseWorkspace(workspace.AddCopy());
         settings.ProfileRenameRequested += name => UseWorkspace(workspace.Rename(name));
