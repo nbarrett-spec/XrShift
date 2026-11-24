@@ -111,7 +111,8 @@ internal static class Program
               --no-capture               stand-in pictures instead of live monitors
               --no-settings              do not open the settings window at start (Ctrl+Alt+S opens it)
               --api                      let other programs on this PC list the scene and switch layouts (pipe ArWorkspace.Api)
-              --bot-hook                 for a Claude Code hook: pass the hook event on standard input to the running app and exit
+              --stereo                   start in 3D: a picture per eye, side by side, for the glasses' 3D mode (Ctrl+Alt+D switches)
+              --bot-hook                for a Claude Code hook: pass the hook event on standard input to the running app and exit
               --free-cursor            let the mouse pointer wander onto the glasses' own desktop area
               --keep-modes               leave virtual monitors' resolution and refresh rate alone
               --fov D                    horizontal view angle of the glasses in degrees (default 50.7, or what you last tuned)

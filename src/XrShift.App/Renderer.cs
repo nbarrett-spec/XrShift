@@ -359,7 +359,11 @@ internal sealed class Renderer : IDisposable
     }
 
     /// <summary>Draws every visible item as seen with the head at <paramref name="head"/>.</summary>
-    public void Draw(Quaternion head, DisplayOptics optics)
+    /// <param name="eyeSeparation">
+    /// 0 for one sharp picture. Above 0 (metres between the eyes) for 3D: one picture per eye, side by side,
+    /// for the glasses in their 3D side-by-side mode.
+    /// </param>
+    public void Draw(Quaternion head, DisplayOptics optics, float eyeSeparation = 0)
     {
         _context.OMSetRenderTargets(_colorView, _depthView);
         _context.ClearRenderTargetView(_colorView, Background);
@@ -369,7 +373,6 @@ internal sealed class Renderer : IDisposable
         float scale = MathF.Min(Width / (float)optics.Width, Height / (float)optics.Height);
         float viewWidth = optics.Width * scale, viewHeight = optics.Height * scale;
         float left = (Width - viewWidth) / 2f, top = (Height - viewHeight) / 2f;
-        _context.RSSetViewport(left, top, viewWidth, viewHeight);
 
         _context.IASetPrimitiveTopology(PrimitiveTopology.TriangleList);
         _context.IASetInputLayout(_layout);
@@ -383,8 +386,25 @@ internal sealed class Renderer : IDisposable
         _context.OMSetBlendState(_blend);
 
         Matrix4x4 projection = optics.Projection();
-        Matrix4x4 viewProjection = Camera.View(head) * projection;
+        if (eyeSeparation <= 0)
+        {
+            _context.RSSetViewport(left, top, viewWidth, viewHeight);
+            DrawItems(projection, Camera.View(head) * projection);
+            return;
+        }
+        foreach (bool rightEye in new[] { false, true })
+        {
+            (float x, float y, float w, float h) = Camera.EyeViewport(Width, Height, optics, rightEye);
+            _context.RSSetViewport(x, y, w, h);
+            float eyeX = (rightEye ? 0.5f : -0.5f) * eyeSeparation;
+            // Things fixed to the view (status line, crosshair) are shifted too, so they sit at their own depth
+            // instead of impossibly far away.
+            DrawItems(Matrix4x4.CreateTranslation(-eyeX, 0, 0) * projection, Camera.EyeView(head, eyeX) * projection);
+        }
+    }
 
+    void DrawItems(Matrix4x4 projection, Matrix4x4 viewProjection)
+    {
         foreach (SceneItem item in _items)
         {
             if (!item.Visible) continue;

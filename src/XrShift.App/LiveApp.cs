@@ -12,7 +12,7 @@ internal static class LiveApp
     const float DegToRad = MathF.PI / 180f;
 
     /// <summary>What the drawing thread should show. Replaced whole by the window thread; never changed in place.</summary>
-    sealed record Snapshot(Layout Layout, IReadOnlyList<DisplayInfo> Sources, IReadOnlyDictionary<string, IntPtr> Windows, ViewSettings View, bool StatusPinned, bool Blank, Deck Deck);
+    sealed record Snapshot(Layout Layout, IReadOnlyList<DisplayInfo> Sources, IReadOnlyDictionary<string, IntPtr> Windows, ViewSettings View, bool StatusPinned, bool Blank, Deck Deck, bool Stereo);
 
     sealed class Shared
     {
@@ -352,13 +352,14 @@ internal static class LiveApp
         // Pinned windows that are open right now. Found here, on the window thread, never on the drawing thread.
         IReadOnlyDictionary<string, IntPtr> pinned = WindowFinder.Resolve(layout, new Dictionary<string, IntPtr>(), search: true);
         bool blank = false;
+        bool stereo = args.Contains("--stereo"); // 3D: one picture per eye, side by side. Not saved: the app always starts sharp.
         Deck deck = new(); // bots, clusters and widgets: they live while the app runs and are not saved
-        var shared = new Shared { Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck) };
+        var shared = new Shared { Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck, stereo) };
         Action afterPublish = () => { };
         void Publish()
         {
             pinned = WindowFinder.Resolve(layout, pinned, search: false);
-            shared.Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck);
+            shared.Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck, stereo);
             afterPublish();
         }
 
@@ -410,11 +411,11 @@ internal static class LiveApp
         [
             (Keys.Q, "Q"), (Keys.S, "S"), (Keys.H, "H"), (Keys.G, "G"), (Keys.OemOpenBrackets, "["), (Keys.OemCloseBrackets, "]"),
             (Keys.OemMinus, "-"), (Keys.Oemplus, "="), (Keys.D1, "1"), (Keys.D2, "2"), (Keys.D3, "3"), (Keys.D4, "4"),
-            (Keys.M, "M"), (Keys.L, "L"), (Keys.B, "B"), (Keys.PageUp, "PgUp"), (Keys.PageDown, "PgDn"), (Keys.K, "K"), (Keys.P, "P"), (Keys.V, "V"), (Keys.O, "O"),
+            (Keys.M, "M"), (Keys.L, "L"), (Keys.B, "B"), (Keys.PageUp, "PgUp"), (Keys.PageDown, "PgDn"), (Keys.K, "K"), (Keys.P, "P"), (Keys.V, "V"), (Keys.O, "O"), (Keys.D, "D"),
         ];
         List<string> taken = otherKeys.Where(k => !window.AddHotKey(k.Key)).Select(k => k.Name).ToList();
         string recentreKey = recentreNames.Count > 0 ? $"Ctrl+Alt+{recentreNames[0]}" : "Space";
-        Log.Line($"Keys, from any program: {recentreKey} recentre, Ctrl+Alt+M mouse to where you look, Ctrl+Alt+L look-to-move on/off, Ctrl+Alt+B hide all, Ctrl+Alt+PgUp/PgDn zoom, Ctrl+Alt+K hand gestures, Ctrl+Alt+P pick up / set down a screen, Ctrl+Alt+O open the bot you look at, Ctrl+Alt+S settings, Ctrl+Alt+Q quit, Ctrl+Alt+1-4 profiles, Ctrl+Alt+G game mode, Ctrl+Alt+H status line, Ctrl+Alt+[ ] glasses delay, Ctrl+Alt+- = view angle.");
+        Log.Line($"Keys, from any program: {recentreKey} recentre, Ctrl+Alt+M mouse to where you look, Ctrl+Alt+L look-to-move on/off, Ctrl+Alt+B hide all, Ctrl+Alt+PgUp/PgDn zoom, Ctrl+Alt+K hand gestures, Ctrl+Alt+P pick up / set down a screen, Ctrl+Alt+O open the bot you look at, Ctrl+Alt+D sharp / 3D, Ctrl+Alt+S settings, Ctrl+Alt+Q quit, Ctrl+Alt+1-4 profiles, Ctrl+Alt+G game mode, Ctrl+Alt+H status line, Ctrl+Alt+[ ] glasses delay, Ctrl+Alt+- = view angle.");
         if (taken.Count > 0)
             Log.Line($"Another program already owns Ctrl+Alt+{string.Join(", Ctrl+Alt+", taken)}; those only work with the glasses' window in front.");
 
@@ -1348,6 +1349,12 @@ internal static class LiveApp
                     layout = layout.With(Layout.Clamp(held with { Scale = held.Scale * (key == Keys.PageUp ? 1.06f : 1f / 1.06f) }));
                     Publish();
                     return;
+                case Keys.D:
+                    // Sharp: one picture, best for text. 3D: a picture per eye, so near things look near. The layout is the same in both.
+                    stereo = !stereo;
+                    Notice(stereo ? "3D on. Set the glasses to 3D side-by-side too." : "Sharp. Set the glasses back to their normal mode.", 5);
+                    Publish();
+                    return;
                 case Keys.O:
                 {
                     // The bot being looked at; failing that, one that is waiting for the wearer.
@@ -1706,7 +1713,7 @@ internal static class LiveApp
 
             scene.Look(head, now.View.Dim, now.Blank, dt, now.View.EasyReading);
             scene.PointToHiddenScreens(head, optics, now.View.EdgeArrows);
-            renderer.Draw(head, optics);
+            renderer.Draw(head, optics, now.Stereo ? Camera.DefaultEyeSeparation : 0);
 
             if (previewNow0() - ratesAt >= 2)
             {
