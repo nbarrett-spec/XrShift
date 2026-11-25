@@ -18,6 +18,8 @@ public interface IControlHost
     string? Spawn(string project);
     /// <summary>Hands a bot an instruction. Null when it was handed over; otherwise why not.</summary>
     string? Tell(string id, string text);
+    /// <summary>Opens a web page as a panel of its own in the room. Null when it was started; otherwise why not.</summary>
+    string? OpenWidget(string label, Uri page);
 }
 
 /// <summary>
@@ -103,6 +105,16 @@ public static class ControlApi
                     if (Text(p, "text") is not { } text) return Error(id, InvalidParams, "bot.tell needs params.text.");
                     if (host.Tell(bot, text) is { } refused) return Error(id, InvalidParams, refused);
                     result = new JsonObject { ["id"] = bot };
+                    break;
+                }
+                case "widget.open":
+                {
+                    // A widget is a web page in a window of its own, pinned as a screen: a dashboard, a calendar.
+                    if (Text(p, "label") is not { } label || Text(p, "url") is not { } address) return Error(id, InvalidParams, "widget.open needs params.label and params.url.");
+                    if (!Uri.TryCreate(address, UriKind.Absolute, out Uri? page) || (page.Scheme != Uri.UriSchemeHttps && page.Scheme != Uri.UriSchemeHttp))
+                        return Error(id, InvalidParams, "url must be a full http or https address.");
+                    if (host.OpenWidget(label, page) is { } refused) return Error(id, InvalidParams, refused);
+                    result = new JsonObject { ["label"] = label };
                     break;
                 }
                 case "voice.say":

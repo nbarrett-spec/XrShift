@@ -16,6 +16,18 @@ public class ControlApiTests : IControlHost
     IReadOnlyList<string> IControlHost.Projects => ["Abel platform", "Agritec"];
     string? IControlHost.Spawn(string project) { if (project == "Agritec") return "Folder is missing."; _spawned.Add(project); return null; }
     string? IControlHost.Tell(string id, string text) { _told.Add($"{id}: {text}"); return null; }
+    readonly List<string> _widgets = [];
+    string? IControlHost.OpenWidget(string label, Uri page) { _widgets.Add($"{label} -> {page}"); return null; }
+
+    [Fact]
+    public void AWidgetOpensOnlyForARealWebAddress()
+    {
+        Call("""{"jsonrpc":"2.0","id":1,"method":"widget.open","params":{"label":"Calendar","url":"https://calendar.google.com/"}}""");
+        Assert.Equal(["Calendar -> https://calendar.google.com/"], _widgets);
+        foreach (string bad in new[] { "calendar", "file:///C:/Windows/System32/calc.exe", "javascript:alert(1)", "ms-settings:display", "//calendar.google.com" })
+            Assert.Equal(-32602, Call($$$"""{"jsonrpc":"2.0","id":2,"method":"widget.open","params":{"label":"x","url":"{{{bad}}}"}}""").GetProperty("error").GetProperty("code").GetInt32());
+        Assert.Single(_widgets);
+    }
 
     Workspace _workspace = new Workspace()
         .WithLayout(new Layout().Add(new ScreenSpec { Name = "Laptop" }).Add(new ScreenSpec { Name = "Mail", Source = ScreenSpec.WindowSource("outlook", "Inbox"), Visible = false }))

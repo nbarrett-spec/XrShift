@@ -103,8 +103,9 @@ internal sealed class ControlApiServer : IDisposable
 }
 
 /// <summary>The live session, as the Control API sees it. Every member runs on the window thread.</summary>
-internal sealed class ControlHost(Func<Workspace> workspace, Action<Workspace> useWorkspace, Func<Deck> deck, Action<Deck> useDeck, Action<string> focus, Func<string, string, string?> tell) : IControlHost
+internal sealed class ControlHost(Func<Workspace> workspace, Action<Workspace> useWorkspace, Func<Deck> deck, Action<Deck> useDeck, Action<string> focus, Func<string, string, string?> tell, Func<string, Uri, string?> openWidget) : IControlHost
 {
+    public string? OpenWidget(string label, Uri page) => openWidget(label, page);
     public IReadOnlyList<string> Projects => [.. XrShift.App.Projects.Load().Keys];
     public string? Spawn(string project) => XrShift.App.Projects.Spawn(project);
     public string? Tell(string id, string text) => tell(id, text);

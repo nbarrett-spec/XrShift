@@ -514,16 +514,32 @@ internal static class LiveApp
             announceLayout(workspace.Current.Name);
         }
         // The Control API, off unless asked for: other programs on this PC list the scene and switch layouts.
+        // The screens that show bots' own windows, by bot: each one leaves with its bot.
+        // shortcut: kept only while the app runs, so a bot's screen from before a restart stays until removed in Settings; save the pairing if that piles up.
+        var botScreens = new Dictionary<string, string>();
+        Action<IntPtr, SceneObject> pinBotWindow = (_, _) => { };
         void UseDeck(Deck changed)
         {
             if (ReferenceEquals(changed, deck)) return;
             deck = changed;
+            foreach (string gone in botScreens.Keys.Where(id => deck.Find(id) is null).ToList())
+            {
+                // Two bots can share one window (two tabs of a terminal): the screen stays while either is left.
+                if (botScreens.Remove(gone, out string? screen) && !botScreens.ContainsValue(screen) && layout.Find(screen) is not null)
+                {
+                    layout = layout.Remove(screen);
+                    workspace = workspace.WithLayout(layout);
+                    settings.SetLayout(layout, sources);
+                    Touch();
+                }
+            }
             Publish();
         }
         Action<string> openObject = _ => { };
         Func<string, string, string?> tellBot = (_, _) => "Not ready yet.";
         Action listen = () => { };
-        var host = new ControlHost(() => workspace, UseWorkspace, () => deck, UseDeck, id => openObject(id), (id, text) => tellBot(id, text));
+        Func<string, Uri, string?> openWidget = (_, _) => "Not ready yet.";
+        var host = new ControlHost(() => workspace, UseWorkspace, () => deck, UseDeck, id => openObject(id), (id, text) => tellBot(id, text), (label, page) => openWidget(label, page));
         // A trial window (--window, --seconds) may run beside the real app: it only has the API when asked, under
         // its own name, so hooks and scripts always reach the real one.
         bool trialRun = args.Contains("--window") || Program.Number(args, "--seconds", 0) > 0;
@@ -809,24 +825,58 @@ internal static class LiveApp
         MatchVirtualCount("Start");
         Func<Layout, Layout, Layout> placeNewAtGaze = (_, after) => after;
         Action putSelectedHere = () => { };
-        settings.WindowPinRequested += window =>
+        // Pins a window as a screen of its own. Given a place (a bot's, say) the screen goes there; otherwise
+        // where the wearer is looking. Returns the screen's id, also when that window was pinned already.
+        string PinWindow(WindowInfo window, (float Yaw, float Pitch)? at = null, string? name = null)
         {
             string source = ScreenSpec.WindowSource(window.Program, window.Title);
             if (layout.Screens.FirstOrDefault(s => string.Equals(s.Source, source, StringComparison.OrdinalIgnoreCase)) is { } already)
             {
                 settings.Select(already.Id);
-                return;
+                return already.Id;
             }
             WindowFinder.Restore(window.Handle); // Windows does not draw a minimised window, so there would be nothing to show
-            ScreenSpec spec = layout.PlaceNew(WindowFinder.FriendlyName(window.Program), source, window.Width, window.Height, OpticsFor(view));
+            ScreenSpec spec = layout.PlaceNew(name ?? WindowFinder.FriendlyName(window.Program), source, window.Width, window.Height, OpticsFor(view));
             Layout beforePin = layout;
-            layout = placeNewAtGaze(beforePin, layout.Add(spec));
+            layout = at is { } place
+                ? layout.Add(Layout.Clamp(spec with { YawDeg = place.Yaw, PitchDeg = place.Pitch }))
+                : placeNewAtGaze(beforePin, layout.Add(spec));
             workspace = workspace.WithLayout(layout);
             pinned = new Dictionary<string, IntPtr>(pinned, StringComparer.OrdinalIgnoreCase) { [source] = window.Handle };
             settings.SetLayout(layout, sources);
             settings.Select(spec.Id);
             Log.Line($"Pinned a window of {window.Program} as screen '{spec.Name}'.");
             Touch();
+            return spec.Id;
+        }
+        settings.WindowPinRequested += window => PinWindow(window);
+        // A widget: the page opens in a browser window with no tabs or address bar, and that window is pinned
+        // where the wearer is looking, under the widget's name.
+        openWidget = (label, page) =>
+        {
+            HashSet<IntPtr> before = [.. WindowFinder.List().Select(w => w.Handle)];
+            try { Process.Start(new ProcessStartInfo("msedge.exe", $"--app=\"{page.AbsoluteUri}\" --new-window") { UseShellExecute = true })?.Dispose(); }
+            catch (System.ComponentModel.Win32Exception e) { return $"Could not open the page: {e.Message}"; }
+            int tries = 0;
+            var appear = new System.Windows.Forms.Timer(parts) { Interval = 500 };
+            appear.Tick += (_, _) =>
+            {
+                WindowInfo? opened = WindowFinder.List().FirstOrDefault(w => !before.Contains(w.Handle) && w.Program.Contains("msedge", StringComparison.OrdinalIgnoreCase));
+                if (opened is null && ++tries < 20) return;
+                appear.Stop();
+                appear.Dispose();
+                if (opened is null) Notice($"{label}: the page's window never appeared.", 4);
+                else PinWindow(opened, null, label);
+            };
+            appear.Start();
+            return null;
+        };
+        pinBotWindow = (handle, bot) =>
+        {
+            if (WindowFinder.List().FirstOrDefault(w => w.Handle == handle) is not { } window) return;
+            // Above the bot, so the bot stays visible under its own window. Removed again when the bot goes.
+            float zoom = view.Zoom > 0.01f ? view.Zoom : 1f; // screens are zoomed, bots are not
+            botScreens[bot.Id] = PinWindow(window, (bot.YawDeg / zoom, (bot.PitchDeg + 24f) / zoom), bot.Label);
         };
         settings.MonitorRemoveRequested += id =>
         {
@@ -1357,6 +1407,7 @@ internal static class LiveApp
             if (deck.Find(id) is not { } o) return;
             IntPtr handle = o.Pid is { } pid ? BotProcess.WindowOf(pid) : IntPtr.Zero;
             UseDeck(deck.Opened(id));
+            if (handle != IntPtr.Zero && deck.Find(id) is { } still) pinBotWindow(handle, still);
             if (handle != IntPtr.Zero) WindowFinder.Activate(handle);
             api?.Publish(ControlApi.ObjectEvent("object.activated", id));
             Notice(handle != IntPtr.Zero ? $"Opened {o.Label}" : $"{o.Label}: no window to open", 2);
