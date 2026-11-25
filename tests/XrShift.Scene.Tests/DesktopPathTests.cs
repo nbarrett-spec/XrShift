@@ -77,4 +77,52 @@ public class DesktopPathTests
         var p = new Point(2000, 500);
         Assert.Equal(p, DesktopPath.Redirect(p, new Point(1900, 500), Glasses, []));
     }
+
+    // Further right on the same desktop: a monitor whose screen is hidden, then one that is shown.
+    static readonly Rectangle Hidden = new(5760, 0, 1920, 1080);
+    static readonly Rectangle Beyond = new(7680, 0, 1920, 1080);
+
+    [Fact]
+    public void AMonitorWithNoScreenBetweenTwoShownOnesIsCrossedLikeTheGlasses()
+    {
+        Rectangle[] monitors = [Laptop, Virtual, Hidden, Beyond];
+        Point landed = DesktopPath.Redirect(new Point(5765, 400), new Point(5755, 400), [Glasses, Hidden], monitors);
+        Assert.Equal(new Point(7681, 400), landed);
+
+        // Back the other way it lands on the virtual monitor, not on the unseen one.
+        Point back = DesktopPath.Redirect(new Point(7675, 400), new Point(7685, 400), [Glasses, Hidden], monitors);
+        Assert.Equal(new Point(5758, 400), back);
+    }
+
+    [Fact]
+    public void AnUnseenMonitorAtTheEndStopsThePointerAtTheEdge()
+    {
+        // The laptop, and to its right a monitor whose screen is hidden; nothing beyond.
+        var side = new Rectangle(1920, 0, 1920, 1080);
+        var before = new Point(1915, 300);
+        Assert.Equal(before, DesktopPath.Redirect(new Point(1925, 300), before, [side], [Laptop, side]));
+    }
+
+    [Fact]
+    public void WithEveryMonitorButOneUnseenThePointerStaysOnThatOne()
+    {
+        Rectangle[] monitors = [Laptop, Virtual, Hidden, Beyond];
+        Rectangle[] blocked = [Glasses, Virtual, Hidden, Beyond];
+        var before = new Point(1915, 538);
+        Assert.Equal(before, DesktopPath.Redirect(new Point(1925, 540), before, blocked, monitors));
+        // Started out on an unseen one: it goes to the one monitor left.
+        Assert.Equal(new Point(960, 600), DesktopPath.Redirect(new Point(6000, 500), new Point(6000, 500), blocked, monitors));
+        // Not in any blocked area: left alone.
+        Assert.Equal(new Point(100, 100), DesktopPath.Redirect(new Point(100, 100), before, blocked, monitors));
+    }
+
+    [Fact]
+    public void UnseenMonitorsAreTheHiddenOnesAndTheOnesWithNoScreen()
+    {
+        var layout = new Layout()
+            .Add(new ScreenSpec { Source = ScreenSpec.DisplaySource("laptop") })
+            .Add(new ScreenSpec { Source = ScreenSpec.DisplaySource("virtual"), Visible = false });
+        List<Rectangle> unseen = DesktopPath.Unseen(layout, [("LAPTOP", Laptop), ("virtual", Virtual), ("other", Hidden)]);
+        Assert.Equal(new[] { Virtual, Hidden }, unseen);
+    }
 }

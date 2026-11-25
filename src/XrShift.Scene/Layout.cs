@@ -127,6 +127,12 @@ public sealed record Layout
 
     public IReadOnlyList<ScreenSpec> Screens { get; init; } = [];
 
+    /// <summary>The desk <see cref="Screens"/> are arranged for (<see cref="Desks.KeyOf"/>); null in files from before desks.</summary>
+    public string? Desk { get; init; }
+
+    /// <summary>The arrangements of the other desks, kept for when the wearer is back at one.</summary>
+    public IReadOnlyList<DeskLayout> Desks { get; init; } = [];
+
     public Layout With(ScreenSpec changed) =>
         this with { Screens = Screens.Select(s => s.Id == changed.Id ? changed : s).ToList() };
 
@@ -179,6 +185,40 @@ public sealed record Layout
         return screen with { YawDeg = yaw };
     }
 
+    /// <summary>
+    /// <paramref name="screen"/> placed beside the screens already shown, on whichever side keeps it nearer straight
+    /// ahead, with its centre no more than <paramref name="reachDeg"/> to either side. When there is no room inside
+    /// that, or <paramref name="maxShown"/> screens are shown already, it comes back hidden and <c>Shown</c> is false,
+    /// so the wearer can be told rather than finding it behind their shoulder. A hidden screen stays hidden.
+    /// </summary>
+    /// <param name="sizeOf">Picture size of the screens already there; 16:9 is assumed when not given.</param>
+    public (ScreenSpec Screen, bool Shown) PlaceInReach(ScreenSpec screen, int pictureWidth, int pictureHeight, DisplayOptics optics,
+        Func<ScreenSpec, (int Width, int Height)>? sizeOf = null, float reachDeg = 60f, int maxShown = 5)
+    {
+        const float gapDeg = 3f;
+        if (!screen.Visible) return (screen, false);
+        List<ScreenSpec> shown = Screens.Where(s => s.Visible && s.Id != screen.Id).ToList();
+        ScreenSpec ahead = screen with { YawDeg = 0, PitchDeg = 0 };
+        if (shown.Count >= maxShown) return (ahead with { Visible = false }, false);
+        if (shown.Count == 0) return (ahead, true);
+
+        float half = screen.ToPanel(pictureWidth, pictureHeight, optics).AngularWidthDeg / 2f;
+        float rightEdge = float.MaxValue, leftEdge = float.MinValue; // yaw: + is left
+        foreach (ScreenSpec s in shown)
+        {
+            (int w, int h) = sizeOf?.Invoke(s) ?? (1920, 1080);
+            float otherHalf = s.ToPanel(w, h, optics).AngularWidthDeg / 2f;
+            rightEdge = MathF.Min(rightEdge, s.YawDeg - otherHalf);
+            leftEdge = MathF.Max(leftEdge, s.YawDeg + otherHalf);
+        }
+        float toRight = rightEdge - gapDeg - half, toLeft = leftEdge + gapDeg + half;
+        // The right first on a tie, as PlaceNew does.
+        float? yaw = MathF.Abs(toRight) <= MathF.Abs(toLeft)
+            ? (MathF.Abs(toRight) <= reachDeg ? toRight : MathF.Abs(toLeft) <= reachDeg ? toLeft : null)
+            : (MathF.Abs(toLeft) <= reachDeg ? toLeft : MathF.Abs(toRight) <= reachDeg ? toRight : null);
+        return yaw is { } y ? (ahead with { YawDeg = y }, true) : (ahead with { Visible = false }, false);
+    }
+
     public string ToJson() => JsonSerializer.Serialize(this, Json);
 
     public static bool TryParse(string json, out Layout layout)
@@ -199,7 +239,12 @@ public sealed record Layout
 
     /// <summary>For hand-edited or damaged files: every value pulled back inside what the app can draw.</summary>
     public Layout Sanitized() =>
-        this with { Screens = (Screens ?? []).Where(s => s is not null).Select(Clamp).ToList() };
+        this with
+        {
+            Screens = (Screens ?? []).Where(s => s is not null).Select(Clamp).ToList(),
+            Desks = (Desks ?? []).Where(d => d is not null)
+                .Select(d => d with { Key = d.Key ?? "", Screens = (d.Screens ?? []).Where(s => s is not null).Select(Clamp).ToList() }).ToList(),
+        };
 
     public static ScreenSpec Clamp(ScreenSpec s) => s with
     {
