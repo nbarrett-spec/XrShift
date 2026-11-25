@@ -1,0 +1,13 @@
+{
+  // Finding the mouse pointer and new windows: the ring round a pointer that has just started moving, the arrow to
+  // a pointer on a screen out of view, and the notice and arrow for a window that opened out of view.
+  "frames": [
+    { "name": "pointer-ring", "layout": "three-screens.layout.json", "marks": [ { "screen": "middle", "x": 0.62, "y": 0.4, "label": "mouse", "ring": true } ] },
+    { "name": "mouse-out-of-view", "layout": "three-screens.layout.json", "yaw": 30, "marks": [ { "screen": "right", "x": 0.5, "y": 0.6, "label": "mouse" } ] },
+    {
+      "name": "new-window-out-of-view", "layout": "three-screens.layout.json", "yaw": 30,
+      "notice": "Notepad opened out of view: follow the arrow, or click it and Ctrl+Alt+W brings it here",
+      "marks": [ { "screen": "right", "x": 0.3, "y": 0.3, "label": "Notepad" } ]
+    }
+  ]
+}

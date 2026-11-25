@@ -89,6 +89,13 @@ public static class Desks
     }
 
     /// <summary>
+    /// The screens of <paramref name="after"/> that are really new: in neither <paramref name="before"/>'s screens
+    /// nor the arrangements it keeps for other desks. Screens brought back by a change of desk are not new.
+    /// </summary>
+    public static List<ScreenSpec> Added(Layout before, Layout after) =>
+        after.Screens.Where(s => before.Find(s.Id) is null && !before.Desks.Any(d => d.Screens.Any(k => k.Id == s.Id))).ToList();
+
+    /// <summary>
     /// Swaps in the arrangement of the desk <paramref name="key"/>. At a desk not seen before, the screens of monitors
     /// it shares with the last desk keep their places, and the rest that are not tied to a desk (virtual monitors,
     /// windows) come back in <paramref name="carried"/> to be placed again around the new desk's monitors.

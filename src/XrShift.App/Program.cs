@@ -257,7 +257,8 @@ internal static class Program
         {
             List<DisplayInfo> displays = Displays.List();
             sources = displays.Where(d => !d.IsGlasses).ToList();
-            layout = LayoutStore.WithScreensFor((LayoutStore.Load() ?? new Workspace()).Current.Layout, sources, optics);
+            layout = LayoutStore.WithScreensFor((LayoutStore.Load() ?? new Workspace()).Current.Layout, sources, optics, out IReadOnlyList<string> hidden);
+            if (hidden.Count > 0) Console.WriteLine($"No room within reach; added hidden: {string.Join(", ", hidden)}.");
             glasses = displays.FirstOrDefault(d => d.IsGlasses)?.DeviceName;
         }
         Deck deck = new();
@@ -312,6 +313,18 @@ internal static class Program
         public float Time { get; init; }
         public bool Menu { get; init; }
         public bool Ruler { get; init; }
+        /// <summary>Spots to point the eye to: the mouse pointer, a window that just opened.</summary>
+        public List<MarkEntry> Marks { get; init; } = [];
+    }
+
+    /// <summary>A mark on a screen of the layout: X and Y run 0 to 1 across its picture from the top left.</summary>
+    sealed record MarkEntry
+    {
+        public string Screen { get; init; } = "";
+        public float X { get; init; } = 0.5f;
+        public float Y { get; init; } = 0.5f;
+        public string Label { get; init; } = "";
+        public bool Ring { get; init; }
     }
 
     sealed record ScenarioFile
@@ -466,6 +479,15 @@ internal static class Program
             using var scene = new SpaceScene(renderer, live: false);
             scene.Apply(layout, [], null, optics);
             scene.Apply(deck);
+            var marks = new List<Mark>();
+            foreach (MarkEntry m in frame.Marks)
+            {
+                // Stand-in screens are drawn 1920x1080.
+                if (layout.Find(m.Screen) is not { } on) { Console.WriteLine($"Frame {frame.Name}: no screen '{m.Screen}' for a mark."); return 2; }
+                if (RoomSpot.Of(new System.Drawing.Point((int)(m.X * 1920), (int)(m.Y * 1080)), [(on, new System.Drawing.Rectangle(0, 0, 1920, 1080))], optics) is { } at)
+                    marks.Add(new Mark(at, m.Label, m.Ring));
+            }
+            scene.SetMarks(marks);
             using Bitmap picture = DrawFrame(renderer, scene, HeadAt(frame.Yaw, frame.Pitch, frame.Roll), optics, view, frame,
                 $"{StillStatus(frame.Yaw, frame.Pitch, frame.Roll)}   {layout.Screens.Count} screens   view {view.FovDeg:F1}°");
             string file = frame.Name + ".png";

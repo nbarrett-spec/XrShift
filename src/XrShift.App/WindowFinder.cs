@@ -254,6 +254,26 @@ internal static class WindowFinder
     }
 
     /// <summary>
+    /// Moves a window into <paramref name="to"/> (a monitor's working area): its own size if that fits, else shrunk
+    /// to fit, in the middle. A maximised window is restored first and maximised again there; a minimised one comes
+    /// back. Never activates it. False if Windows refused.
+    /// </summary>
+    public static bool MoveTo(IntPtr handle, System.Drawing.Rectangle to)
+    {
+        if (!IsWindow(handle)) return false;
+        bool zoomed = IsZoomed(handle);
+        if (zoomed || IsIconic(handle)) ShowWindow(handle, 9 /* restore */);
+        if (Bounds(handle) is not { } b || !GetWindowRect(handle, out RECT outer)) return false;
+        System.Drawing.Rectangle place = WindowFit.Into(b.Size, to);
+        // The invisible resize border sits outside what is drawn: the outer rectangle is that much bigger.
+        int left = place.Left - (b.Left - outer.Left), top = place.Top - (b.Top - outer.Top);
+        int width = place.Width + (b.Left - outer.Left) + (outer.Right - b.Right), height = place.Height + (b.Top - outer.Top) + (outer.Bottom - b.Bottom);
+        bool moved = SetWindowPos(handle, IntPtr.Zero, left, top, width, height, 0x0004 /* keep z-order */ | 0x0010 /* do not activate */);
+        if (zoomed) ShowWindow(handle, 3 /* maximise, on the monitor it is on now */);
+        return moved;
+    }
+
+    /// <summary>
     /// Keeps a pinned window drawing. Teams, Chrome, Edge and other Chromium-based programs stop drawing while
     /// other windows cover them completely, to save power, so their floating screen froze until clicked. Under
     /// XrShift's picture on the glasses they count as uncovered (the scene is a tool window, which such programs
