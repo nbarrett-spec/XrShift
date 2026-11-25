@@ -3,12 +3,25 @@
 # It copies the app to your own programs folder, copies network.json (the shared secret) to the app's settings
 # folder, and adds the bot hooks to Claude Code's settings, keeping a backup. No administrator rights needed.
 # To undo: delete the two folders it names at the end and put the settings backup back.
+param([switch]$Force)   # -Force: install even if the kit is older than what is already on this PC
 $ErrorActionPreference = 'Stop'
 $kit = $PSScriptRoot
 $appSource = Join-Path $kit 'XrShift'
 if (-not (Test-Path (Join-Path $appSource 'XrShift.exe'))) { throw "XrShift\XrShift.exe is not beside this script. Unzip the whole kit first." }
 
 $appFolder = Join-Path $env:LOCALAPPDATA 'Programs\XrShift'
+
+# Say which version this kit is, and do not put an older one over a newer one unless -Force.
+function Get-Version($exe) {
+    if (-not (Test-Path $exe)) { return $null }
+    $v = (Get-Item $exe).VersionInfo.ProductVersion -replace '[+-].*$', ''
+    try { [version]$v } catch { $null }
+}
+$new = Get-Version (Join-Path $appSource 'XrShift.exe')
+$old = Get-Version (Join-Path $appFolder 'XrShift.exe')
+Write-Host "Installing XrShift $new$(if ($old) { " (this PC has $old)" })."
+if ($old -and $new -and $new -lt $old -and -not $Force) { throw "This kit is XrShift $new but $old is already installed here. Nothing was changed. Run again with -Force to install the older version anyway." }
+
 if (Get-Process XrShift -ErrorAction SilentlyContinue) { throw 'XrShift is running on this PC. Quit it (Ctrl+Alt+Q or its tray icon) and run this again.' }
 New-Item -ItemType Directory -Force $appFolder | Out-Null
 Copy-Item (Join-Path $appSource '*') $appFolder -Recurse -Force

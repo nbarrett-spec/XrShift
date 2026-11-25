@@ -1,0 +1,49 @@
+# Cuts a release when a tag like v0.3.1 is pushed: build, test, publish self-contained, zip the kit for the other PCs,
+# and attach it to a GitHub release. See docs/RELEASING.md.
+name: release
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Version from the tag
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') { throw "Tag '${{ github.ref_name }}' is not v<major>.<minor>.<patch>." }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Build
+        run: dotnet build XrShift.slnx -c Release -p:Version=${{ env.VERSION }}
+      - name: Test
+        run: dotnet test XrShift.slnx -c Release --no-build
+
+      - name: Publish and zip the kit
+        shell: pwsh
+        run: |
+          dotnet publish src/XrShift.App -c Release -r win-x64 --self-contained true -p:Version=${{ env.VERSION }} -o kit/XrShift --nologo
+          if ($LASTEXITCODE -ne 0) { throw 'publish failed' }
+          Copy-Item scripts/setup-other-pc.ps1 kit/
+          # The kit must never carry settings or the shared secret.
+          if (Get-ChildItem kit -Recurse -Filter network.json) { throw 'network.json found in the kit' }
+          Compress-Archive -Path kit/* -DestinationPath "XrShift-kit-${{ env.VERSION }}.zip"
+
+      - name: Create the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "${{ github.ref_name }}" "XrShift-kit-${{ env.VERSION }}.zip" --title "XrShift ${{ env.VERSION }}" --generate-notes --verify-tag

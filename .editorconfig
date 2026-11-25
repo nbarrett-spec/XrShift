@@ -1,0 +1,36 @@
+root = true
+
+# Describes the code as it is written today; it does not ask for a reformat.
+# No end_of_line on purpose: git stores LF and Windows checkouts turn it into CRLF.
+[*]
+charset = utf-8
+indent_style = space
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+[*.{cs,csx}]
+indent_size = 4
+csharp_style_namespace_declarations = file_scoped:suggestion
+# System usings first, then the rest, as in the existing files.
+dotnet_sort_system_directives_first = true
+dotnet_separate_import_directive_groups = false
+# Braces on their own line; a single statement may go without braces.
+csharp_new_line_before_open_brace = all
+csharp_new_line_before_else = true
+csharp_new_line_before_catch = true
+csharp_new_line_before_finally = true
+csharp_prefer_braces = when_multiline:silent
+# Private fields: _name, and s_name for statics, without "private".
+dotnet_naming_rule.private_fields.symbols = private_fields
+dotnet_naming_rule.private_fields.style = underscore
+dotnet_naming_rule.private_fields.severity = silent
+dotnet_naming_symbols.private_fields.applicable_kinds = field
+dotnet_naming_symbols.private_fields.applicable_accessibilities = private
+dotnet_naming_style.underscore.required_prefix = _
+dotnet_naming_style.underscore.capitalization = camel_case
+
+[*.{csproj,props,targets,slnx,xml,yml,yaml,json}]
+indent_size = 2
+
+[*.ps1]
+indent_size = 4

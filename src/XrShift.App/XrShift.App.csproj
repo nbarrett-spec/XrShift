@@ -7,7 +7,6 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <AssemblyName>XrShift</AssemblyName>
     <ApplicationIcon>XrShift.ico</ApplicationIcon>
-    <Version>0.2.0</Version>
     <Product>XrShift</Product>
     <Description>Floating screens for XR glasses on Windows</Description>
     <RootNamespace>XrShift.App</RootNamespace>

@@ -4,5 +4,20 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
+    <!-- The one version number for every project. A release build overrides it: dotnet build -p:Version=0.3.1 (see docs\RELEASING.md). -->
+    <Version>0.2.0</Version>
   </PropertyGroup>
+
+  <!-- Adds the short git commit to the informational version (0.2.0+abc1234), which is what the app shows after the "+" is
+       trimmed. No git, or no .git folder: this stays quiet and the version is just the number. -->
+  <Target Name="XrShiftSourceRevision" BeforeTargets="InitializeSourceControlInformation" Condition="'$(SourceRevisionId)' == ''">
+    <Exec Command="git rev-parse --short=8 HEAD" ConsoleToMSBuild="true" StandardOutputImportance="low" StandardErrorImportance="low"
+          IgnoreExitCode="true" ContinueOnError="true" WorkingDirectory="$(MSBuildThisFileDirectory)">
+      <Output TaskParameter="ConsoleOutput" PropertyName="XrShiftGitRevision" />
+      <Output TaskParameter="ExitCode" PropertyName="XrShiftGitExit" />
+    </Exec>
+    <PropertyGroup Condition="'$(XrShiftGitExit)' == '0' and '$(XrShiftGitRevision)' != ''">
+      <SourceRevisionId>$(XrShiftGitRevision)</SourceRevisionId>
+    </PropertyGroup>
+  </Target>
 </Project>
