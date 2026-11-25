@@ -65,6 +65,14 @@ internal sealed record ViewSettings
     public float EasyReading { get; init; }
     /// <summary>Every new window is moved onto the monitor of the screen the wearer is looking at, as Ctrl+Alt+W does.</summary>
     public bool BringNewWindows { get; init; }
+    /// <summary>The picture is held still while the head is nearly still, so text does not shake (HeadTracker.ReadingSteady).</summary>
+    public bool ReadingSteady { get; init; } = true;
+    /// <summary>The furthest the head is predicted ahead, ms (HeadTracker.MaxLookAheadMs): less is smoother, more is snappier.</summary>
+    public float LookAheadMs { get; init; } = Balanced;
+    /// <summary>The three choices the settings window offers for <see cref="LookAheadMs"/>.</summary>
+    public const float Smoother = 15, Balanced = 25, Snappier = 40, MaxLookAheadMs = 60;
+    /// <summary>A bot's card shows what it last said or was asked. Off for a room others may see.</summary>
+    public bool BotNotes { get; init; } = true;
     public const float MinHeldFovDeg = 30, MaxHeldFovDeg = 150;
 
     public static ViewSettings Default { get; } = new();
@@ -89,14 +97,14 @@ internal sealed record ViewSettings
     }
 
     public string ToText() => string.Create(CultureInfo.InvariantCulture,
-        $"delay={DelayMs:F1};fov={FovDeg:F2};level={LevelDeg:F2};roll={RollDeg:F2};ruler={(Ruler ? 1 : 0)};look={(LookPointer ? (LookFollow ? 2 : 1) : 0)};focus={(LookFocus ? 1 : 0)};zoom={Zoom:F2};dim={(Dim ? 1 : 0)};drift={(Follow ? 1 : 0)};break={BreakMinutes};hands={(Hands ? 1 : 0)};held={HeldFovDeg:F1};arrows={(EdgeArrows ? 1 : 0)};easy={EasyReading:F2};bring={(BringNewWindows ? 1 : 0)}");
+        $"delay={DelayMs:F1};fov={FovDeg:F2};level={LevelDeg:F2};roll={RollDeg:F2};ruler={(Ruler ? 1 : 0)};look={(LookPointer ? (LookFollow ? 2 : 1) : 0)};focus={(LookFocus ? 1 : 0)};zoom={Zoom:F2};dim={(Dim ? 1 : 0)};drift={(Follow ? 1 : 0)};break={BreakMinutes};hands={(Hands ? 1 : 0)};held={HeldFovDeg:F1};arrows={(EdgeArrows ? 1 : 0)};easy={EasyReading:F2};bring={(BringNewWindows ? 1 : 0)};steady={(ReadingSteady ? 1 : 0)};ahead={LookAheadMs:F0};notes={(BotNotes ? 1 : 0)}");
 
     /// <summary>Reads the saved text. Settings added in later versions may be missing; the two original ones may not.</summary>
     public static bool TryParse(string text, out ViewSettings settings)
     {
         settings = Default;
         float? delay = null, fov = null;
-        float level = 0, roll = 0, ruler = 0, look = 0, focus = 0, zoom = 1, dimmed = 0, drift = 0, rest = 0, hands = 0, held = DisplayOptics.OnePro.HorizontalFovDeg, arrows = 1, easy = 0, bring = 0;
+        float level = 0, roll = 0, ruler = 0, look = 0, focus = 0, zoom = 1, dimmed = 0, drift = 0, rest = 0, hands = 0, held = DisplayOptics.OnePro.HorizontalFovDeg, arrows = 1, easy = 0, bring = 0, steady = 1, ahead = Balanced, notes = 1;
         foreach (string part in text.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
             string[] kv = part.Split('=');
@@ -120,6 +128,9 @@ internal sealed record ViewSettings
                 case "arrows": arrows = value; break;
                 case "easy": easy = value; break;
                 case "bring": bring = value; break;
+                case "steady": steady = value; break;
+                case "ahead": ahead = value; break;
+                case "notes": notes = value; break;
                 default: return false;
             }
         }
@@ -144,6 +155,9 @@ internal sealed record ViewSettings
             EdgeArrows = arrows != 0,
             EasyReading = Math.Clamp(easy, 0f, 1f),
             BringNewWindows = bring != 0,
+            ReadingSteady = steady != 0,
+            LookAheadMs = Math.Clamp(ahead, 0f, MaxLookAheadMs),
+            BotNotes = notes != 0,
         };
         return true;
     }

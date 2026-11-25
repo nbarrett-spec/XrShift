@@ -161,6 +161,17 @@ public sealed record Deck
         _ => this,
     };
 
+    /// <summary>What a card says instead of a bot's note when the wearer has chosen not to show them.</summary>
+    public const string HiddenNote = "What it was asked is hidden (Bots page in Settings).";
+
+    /// <summary>
+    /// The deck as the room should draw it. Without notes, every bot's note is replaced by <see cref="HiddenNote"/>,
+    /// for a room others may see; the deck itself keeps the notes, so turning them back on shows them again.
+    /// </summary>
+    public Deck Shown(bool notes) => notes || Objects.All(o => o.Note.Length == 0)
+        ? this
+        : new Deck { Objects = Objects.Select(o => o.Note.Length == 0 ? o : o with { Note = HiddenNote }).ToList() };
+
     /// <summary>The object nearest a direction of gaze, if one is within reach of it.</summary>
     public SceneObject? Nearest(float yawDeg, float pitchDeg, float withinDeg = SceneObject.SizeDeg) =>
         Objects

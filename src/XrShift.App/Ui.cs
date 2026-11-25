@@ -143,6 +143,22 @@ internal sealed class PillButton : Control
         set { _on = value; Invalidate(); }
     }
 
+    /// <summary>
+    /// Shown as not available and does nothing when clicked, but still answers the pointer, so its hint and
+    /// tooltip can say why (Windows gives a disabled control no tooltip).
+    /// </summary>
+    public bool Inert
+    {
+        get => _inert;
+        set { _inert = value; Cursor = value ? Cursors.Default : Cursors.Hand; Invalidate(); }
+    }
+    bool _inert;
+
+    protected override void OnClick(EventArgs e)
+    {
+        if (!_inert) base.OnClick(e);
+    }
+
     public PillButton()
     {
         SetStyle(ControlStyles.UserPaint | ControlStyles.AllPaintingInWmPaint | ControlStyles.OptimizedDoubleBuffer |
@@ -192,14 +208,14 @@ internal sealed class PillButton : Control
             return;
         }
 
-        bool primary = Look == Looks.Accent;
-        Color fill = !Enabled ? ground
+        bool primary = Look == Looks.Accent, live = Enabled && !_inert; // an inert button looks disabled
+        Color fill = !live ? ground
             : primary ? (_down ? ControlPaint.Dark(Ui.Accent, 0.08f) : _hover ? ControlPaint.Light(Ui.Accent, 0.25f) : Ui.Accent)
             : _on ? (_hover ? Color.FromArgb(22, 92, 108) : Ui.AccentDeep)
             : Look == Looks.Ghost ? (_hover ? Ui.Raised : ground)
             : _down ? Ui.Line : _hover ? Color.FromArgb(42, 52, 128) : Ui.Raised;
-        Color edge = !Enabled ? Ui.Line : _on && !primary ? Ui.Fade(Ui.Accent, 200) : Look == Looks.Ghost ? Ui.Rim : Ui.Fade(Ui.Rim, 140);
-        Color ink = !Enabled ? Ui.Faint : primary ? Ui.OnAccent : _on ? Ui.Accent : TextColour ?? Ui.Ink;
+        Color edge = !live ? Ui.Line : _on && !primary ? Ui.Fade(Ui.Accent, 200) : Look == Looks.Ghost ? Ui.Rim : Ui.Fade(Ui.Rim, 140);
+        Color ink = !live ? Ui.Faint : primary ? Ui.OnAccent : _on ? Ui.Accent : TextColour ?? Ui.Ink;
 
         using (GraphicsPath path = Ui.Rounded(r, Radius * d))
         {
@@ -209,7 +225,7 @@ internal sealed class PillButton : Control
                 using var pen = new Pen(edge, d);
                 g.DrawPath(pen, path);
             }
-            if (Focused && Enabled)
+            if (Focused && live)
             {
                 using var ring = new Pen(primary ? Ui.Ink : Ui.Accent, 1.5f * d);
                 g.DrawPath(ring, path);

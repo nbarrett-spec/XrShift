@@ -48,7 +48,7 @@ internal static class Program
             return sent ? 0 : 2;
         }
         if (args.Contains("--virtual")) return VirtualStatus(Option(args, "--virtual"));
-        if (Option(args, "--settings-shot") is { } settingsShot) return SettingsShot(settingsShot, Option(args, "--page"), args.Contains("--stationary"));
+        if (Option(args, "--settings-shot") is { } settingsShot) return SettingsShot(settingsShot, Option(args, "--page"), args.Contains("--stationary"), args);
 
         string? shot = Option(args, "--shot");
         if (shot is not null) return Shot(shot, args);
@@ -137,7 +137,7 @@ internal static class Program
               --replay-capture IMU --out DIR   run the head tracker over a recording ('xrprobe dump' or 'synth') and save the
                 --seconds S --every MS         frame the wearer sees every MS ms for S seconds, with DIR\poses.csv
                 --predict MS --layout F --deck F   (prediction default 25 ms; layout default one test screen ahead)
-              --settings-shot FILE.png   save a picture of the settings window and exit (--page screen|stationary|follow|tune, --stationary)
+              --settings-shot FILE.png   save a picture of the settings window and exit (--page home|welcome|screen|follow|stationary|hands|games|bots|voice|pcs|settings|advanced|keys, --stationary, --sample-bots)
             Keys, from any program: Ctrl+Alt+0 (or Home, or Space) recentre, Ctrl+Alt+S settings, Ctrl+Alt+Q quit,
             Ctrl+Alt+1 to 4 profiles, Ctrl+Alt+G game mode (glasses show their own desktop),
             Ctrl+Alt+M bring the mouse pointer to where you are looking,
@@ -562,7 +562,8 @@ internal static class Program
     }
 
     /// <summary>Draws the settings window as it would open, for checking its look without a person at the screen.</summary>
-    static int SettingsShot(string path, string? page, bool stationary)
+    /// <param name="page">home, welcome, screen, follow, stationary, hands, games, bots, voice, pcs, settings, advanced or keys.</param>
+    static int SettingsShot(string path, string? page, bool stationary, string[] args)
     {
         ViewSettings view = ViewSettings.Load();
         DisplayOptics optics = DisplayOptics.OnePro with { HorizontalFovDeg = view.FovDeg };
@@ -574,12 +575,43 @@ internal static class Program
         settings.SetProfiles(workspace.Profiles.Select(p => p.Name).ToList(), workspace.Active);
         Rectangle home = (sources.FirstOrDefault(d => d.Primary) ?? sources[0]).Bounds;
         settings.Location = new Point(home.Left + 40, home.Top + 40);
+        // Claude Code's settings are read from the settings folder's copy, never the real one (see ClaudeSettingsPath).
+        settings.ClaudeSettingsPath = Path.Combine(TrackingConfig.Folder, "claude-settings.json");
+        if (args.Contains("--sample-bots"))
+        {
+            // A few made-up bots, to see the Bots page and the status with some in it.
+            Deck sample = new Deck()
+                .Report("a", "UserPromptSubmit", "invoice-export", 1, note: "Fix the rounding in the monthly export")
+                .Report("b", "UserPromptSubmit", "site-redesign", 2)
+                .Report("b", "Notification", note: "May I run the database migration?")
+                .Report("c", "Stop", "notes", null, "DESK-PC", DateTime.UtcNow, "Summarised the meeting");
+            settings.BotsSource = () => sample;
+            settings.SetLinks(apiRunning: true, netRunning: false);
+        }
         settings.Show();
         settings.SetGlassesMode(stationary);
-        settings.ShowPageNamed(page ?? "screen");
+        string name = page ?? "screen";
+        if (name != "welcome") settings.HideGuide();
+        settings.ShowPageNamed(name);
         Application.DoEvents();
         using var picture = new Bitmap(settings.Width, settings.Height);
         settings.DrawToBitmap(picture, new Rectangle(Point.Empty, settings.Size));
+        if (name == "keys")
+        {
+            // The key reference is a box of its own: drawn instead of the window.
+            using Form keys = settings.KeysForm();
+            keys.StartPosition = FormStartPosition.Manual;
+            keys.Location = settings.Location;
+            keys.Show(settings);
+            Application.DoEvents();
+            using var box = new Bitmap(keys.Width, keys.Height);
+            keys.DrawToBitmap(box, new Rectangle(Point.Empty, keys.Size));
+            keys.Close();
+            settings.Close();
+            SavePng(box, path);
+            Console.WriteLine($"Keys {box.Width}x{box.Height} -> {path}");
+            return 0;
+        }
         settings.Close();
         SavePng(picture, path);
         Console.WriteLine($"Settings window {picture.Width}x{picture.Height} -> {path}");

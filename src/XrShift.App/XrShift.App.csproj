@@ -25,6 +25,8 @@
     <!-- The SteamVR driver, when it has been built (src\XrShift.SteamVR\build.cmd). -->
     <None Include="..\XrShift.SteamVR\xrshift\**\*" Link="steamvr\xrshift\%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <None Include="..\..\scripts\hands\setup.ps1" Link="hands\setup.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- For "Make a kit for another PC" in the settings window, which puts it beside a copy of the app. -->
+    <None Include="..\..\scripts\setup-other-pc.ps1" Link="setup-other-pc.ps1" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\XrShift.Tracking\XrShift.Tracking.csproj" />
