@@ -111,7 +111,7 @@ internal static class LiveApp
     static bool s_ownsMonitors;
 
     /// <summary>A file in the settings folder that says the Control API should be on, as --api does for one run.</summary>
-    static string ApiFlag => Path.Combine(TrackingConfig.Folder, "api-on");
+    internal static string ApiFlag => Path.Combine(TrackingConfig.Folder, "api-on");
 
     /// <summary>What to do when the app is started a second time: the running copy shows itself.</summary>
     static volatile Action? s_show;
@@ -361,12 +361,12 @@ internal static class LiveApp
         bool blank = false;
         bool stereo = args.Contains("--stereo"); // 3D: one picture per eye, side by side. Not saved: the app always starts sharp.
         Deck deck = new(); // bots, clusters and widgets: they live while the app runs and are not saved
-        var shared = new Shared { Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck, stereo) };
+        var shared = new Shared { Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck.Shown(view.BotNotes), stereo) };
         Action afterPublish = () => { };
         void Publish()
         {
             pinned = WindowFinder.Resolve(layout, pinned, search: false);
-            shared.Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck, stereo);
+            shared.Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck.Shown(view.BotNotes), stereo);
             afterPublish();
         }
 
@@ -411,18 +411,12 @@ internal static class LiveApp
         Log.Line($"Profile {workspace.Current.Name}: {layout.Screens.Count} screens ({string.Join(", ", layout.Screens.Select(s => s.Name))}).");
 
         // ---- keys ------------------------------------------------------------------------------
+        // The keys and what they do are one list (Hotkeys), which the settings window's key reference shows too.
         // Recentre gets three tries, because other programs often hold one of them already.
-        (Keys Key, string Name)[] recentreKeys = [(Keys.D0, "0"), (Keys.Home, "Home"), (Keys.Space, "Space")];
-        List<string> recentreNames = recentreKeys.Where(k => window.AddHotKey(k.Key)).Select(k => k.Name).ToList();
-        (Keys Key, string Name)[] otherKeys =
-        [
-            (Keys.Q, "Q"), (Keys.S, "S"), (Keys.H, "H"), (Keys.G, "G"), (Keys.OemOpenBrackets, "["), (Keys.OemCloseBrackets, "]"),
-            (Keys.OemMinus, "-"), (Keys.Oemplus, "="), (Keys.D1, "1"), (Keys.D2, "2"), (Keys.D3, "3"), (Keys.D4, "4"),
-            (Keys.M, "M"), (Keys.L, "L"), (Keys.B, "B"), (Keys.PageUp, "PgUp"), (Keys.PageDown, "PgDn"), (Keys.K, "K"), (Keys.P, "P"), (Keys.V, "V"), (Keys.O, "O"), (Keys.D, "D"), (Keys.T, "T"), (Keys.W, "W"),
-        ];
-        List<string> taken = otherKeys.Where(k => !window.AddHotKey(k.Key)).Select(k => k.Name).ToList();
+        List<string> recentreNames = Hotkeys.All.Where(k => k.Recentre && window.AddHotKey((Keys)k.Code)).Select(k => k.Name).ToList();
+        List<string> taken = Hotkeys.All.Where(k => !k.Recentre && !window.AddHotKey((Keys)k.Code)).Select(k => k.Name).ToList();
         string recentreKey = recentreNames.Count > 0 ? $"Ctrl+Alt+{recentreNames[0]}" : "Space";
-        Log.Line($"Keys, from any program: {recentreKey} recentre, Ctrl+Alt+M mouse to where you look, Ctrl+Alt+W window in front to where you look, Ctrl+Alt+L look-to-move on/off, Ctrl+Alt+B hide all, Ctrl+Alt+PgUp/PgDn zoom, Ctrl+Alt+K hand gestures, Ctrl+Alt+P pick up / set down a screen, Ctrl+Alt+O open the bot you look at, Ctrl+Alt+D sharp / 3D, Ctrl+Alt+T talk, Ctrl+Alt+S settings, Ctrl+Alt+Q quit, Ctrl+Alt+1-4 profiles, Ctrl+Alt+G game mode, Ctrl+Alt+H status line, Ctrl+Alt+[ ] glasses delay, Ctrl+Alt+- = view angle.");
+        Log.Line("Keys, from any program: " + string.Join("; ", Hotkeys.Reference().Select(r => $"{r.Keys} {r.What}")) + ".");
         if (taken.Count > 0)
             Log.Line($"Another program already owns Ctrl+Alt+{string.Join(", Ctrl+Alt+", taken)}; those only work with the glasses' window in front.");
 
@@ -600,6 +594,14 @@ internal static class LiveApp
         settings.QuitRequested += window.Close;
         settings.MouseToGazeRequested += () => PointerToGaze();
         settings.BlankChanged += on => { blank = on; Publish(); };
+        // Steadiness from view.txt now, and whenever the window changes it.
+        void Steady(ViewSettings v) { tracker.ReadingSteady = v.ReadingSteady; tracker.MaxLookAheadMs = v.LookAheadMs; }
+        Steady(view);
+        settings.ViewChanged += Steady;
+        settings.BotsSource = () => deck;
+        settings.SetLinks(apiRunning: api is not null, netRunning: net is not null);
+        settings.SetGlassesDisplay(direct ? $"{shownOn.Label}, direct" : shownOn.Label);
+        settings.VoiceTryRequested += () => listen();
 
         // Notes what is loading the graphics cards whenever the glasses start dropping frames.
         using var perf = new PerfWatch(() => (presenter.FramesPerSecond, shownOn.RefreshHz, presenter.SlowFrames, presenter.PoseToScreenMs));
@@ -636,15 +638,7 @@ internal static class LiveApp
         using var tray = new NotifyIcon { Icon = AppIcon.Value, Text = "XrShift", Visible = true };
         using var menu = new ContextMenuStrip();
         menu.Items.Add("Settings", null, (_, _) => ShowSettings());
-        // The Control API (bots, scripts) is off unless asked for. This remembers the choice, so a start from the
-        // Start menu or with Windows has it too. Read at the start of a session, hence "from the next start".
-        var apiItem = new ToolStripMenuItem("Bots and Control API (from the next start)") { Checked = File.Exists(ApiFlag), CheckOnClick = true };
-        apiItem.CheckedChanged += (_, _) =>
-        {
-            try { if (apiItem.Checked) File.WriteAllText(ApiFlag, ""); else File.Delete(ApiFlag); }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log.Line($"Could not save the Control API choice: {e.Message}"); }
-        };
-        menu.Items.Add(apiItem);
+        // Bots and the Control API are switched on the settings window's Bots page (the same api-on file).
         menu.Items.Add($"Recentre ({recentreKey})", null, (_, _) => { lock (gate) recenter = true; });
         menu.Items.Add("Plain screen / game mode (Ctrl+Alt+G)", null, (_, _) => setGameMode(!gameMode));
         s_show = () => window.BeginInvoke(ShowSettings);
@@ -1483,7 +1477,7 @@ internal static class LiveApp
         // Push to talk (Ctrl+Alt+T): one spoken command, handled exactly as the same sentence sent to voice.say.
         using var voice = new Voice();
         listen = () => voice.Listen(new VoiceCommands.Known(layout.Screens, deck.Objects, workspace.Profiles.Select(p => p.Name).ToList(), host.Projects));
-        voice.Status += text => { try { window.BeginInvoke(() => Notice(text, 4)); } catch (InvalidOperationException) { } };
+        voice.Status += text => { try { window.BeginInvoke(() => { Notice(text, 4); settings.SetVoiceResult(null, text); }); } catch (InvalidOperationException) { } };
         voice.Heard += text =>
         {
             try
@@ -1498,6 +1492,7 @@ internal static class LiveApp
                     string reply = ControlApi.Handle(request.ToJsonString(), host, out _) ?? "";
                     string? problem = System.Text.Json.Nodes.JsonNode.Parse(reply)?["error"]?["message"]?.GetValue<string>();
                     Notice(problem is null ? $"\"{text}\"" : $"\"{text}\": {problem}", 4);
+                    settings.SetVoiceResult(text, problem);
                 });
             }
             catch (InvalidOperationException) { }

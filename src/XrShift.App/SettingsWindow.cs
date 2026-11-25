@@ -4,13 +4,14 @@ using XrShift.Scene;
 namespace XrShift.App;
 
 /// <summary>
-/// XrShift's window on the PC, in five pages chosen from a side menu:
-/// Home: the four ways to use the glasses (what each gives and does not), the glasses' state, quick actions.
+/// XrShift's window on the PC, in pages chosen from a side menu:
+/// Home: the four ways to use the glasses (what each gives and does not), how things are now, quick actions.
 /// Screens: the room with every screen in it (from above in stationary mode), and the selected screen's settings.
-/// Hands, Games, Settings: gestures, plain screen and VR, and fine tuning.
+/// Hands, Games: gestures, plain screen and VR. Bots, Voice, Other PCs (SettingsPages.cs): Claude Code sessions,
+/// push to talk, and the link to the wearer's other PCs. Settings: fine tuning and the app itself.
 /// Every change applies at once.
 /// </summary>
-internal sealed class SettingsWindow : Form
+internal sealed partial class SettingsWindow : Form
 {
     sealed record SourceChoice(string Source, string Text)
     {
@@ -34,7 +35,13 @@ internal sealed class SettingsWindow : Form
 
     // Frame.
     readonly NavRail _rail = new();
-    readonly AuroraPanel _homePage = new(), _handsPage = new(), _gamesPage = new(), _settingsPage = new();
+    readonly AuroraPanel _homePage = new(), _handsPage = new(), _gamesPage = new(), _botsPage = new(), _voicePage = new(), _pcsPage = new(), _settingsPage = new();
+    /// <summary>Every page in the order of the side menu.</summary>
+    Control[] Pages => [_homePage, _screensPage, _handsPage, _gamesPage, _botsPage, _voicePage, _pcsPage, _settingsPage];
+    static readonly string[] PageNames = ["Home", "Screens", "Hands", "Games", "Bots", "Voice", "Other PCs", "Settings"];
+    const int BotsIndex = 4, VoiceIndex = 5, PcsIndex = 6, SettingsIndex = 7;
+    /// <summary>Plain-word tips for every button off the Screens page (there the hint panel says the same).</summary>
+    readonly ToolTip _tips = new() { AutoPopDelay = 15000, InitialDelay = 400, ReshowDelay = 100 };
     readonly System.Windows.Forms.Panel _screensPage = new();
     readonly System.Windows.Forms.Panel _profileBar = new();
     readonly PillButton _live = new(), _modeChip = new(), _guide = new();
@@ -43,7 +50,6 @@ internal sealed class SettingsWindow : Form
     // Home.
     readonly ModeCard _cardFollow = new(), _cardStationary = new(), _cardPlain = new(), _cardVr = new();
     readonly PillButton _game = new(), _vr = new();
-    readonly Label _homeStatus = new();
     readonly WelcomeCard _welcome = new();
 
     // Screens: the room and its dock.
@@ -62,7 +68,7 @@ internal sealed class SettingsWindow : Form
     readonly PillButton _source = new(), _visible = new(), _follows = new(), _sizes = new(), _shape = new(), _rate = new();
     readonly SliderRow _side, _height, _size, _depth, _turn, _curve, _tilt, _bright;
     readonly PillButton _pointerOff = new(), _pointerJump = new(), _pointerFollow = new(), _focus = new(), _toGaze = new();
-    readonly SliderRow _zoom, _held;
+    readonly SliderRow _held;
     readonly PillButton _dim = new(), _blank = new(), _place = new(), _recentre = new(), _drift = new();
     readonly PillButton _fit = new(), _putHere = new();
 
@@ -122,9 +128,13 @@ internal sealed class SettingsWindow : Form
         _layout = layout;
         _view = view;
         _sources = sources;
-        _defaultHint = $"{recentreKey} recentre  ·  Ctrl+Alt+S this window  ·  Ctrl+Alt+P put a screen where you look\n" +
-                       "Ctrl+Alt+L pointer  ·  Ctrl+Alt+PgUp / PgDn zoom  ·  Ctrl+Alt+B hide all\n" +
-                       "Ctrl+Alt+G plain screen  ·  Ctrl+Alt+V VR  ·  Ctrl+Alt+Q or X quits";
+        _defaultHint = "Point at anything here for a word on what it does. Every key XrShift answers to is under Keys.";
+        _tips.Popup += (_, e) =>
+        {
+            // On the Screens page the hint panel already says it.
+            for (Control? c = e.AssociatedControl; c is not null; c = c.Parent)
+                if (c == _screensPage) { e.Cancel = true; return; }
+        };
 
         Text = "XrShift";
         Icon = AppIcon.Value;
@@ -143,6 +153,9 @@ internal sealed class SettingsWindow : Form
         _rail.Add("", "Screens");
         _rail.Add("", "Hands");
         _rail.Add("", "Games");
+        _rail.Add("", "Bots");
+        _rail.Add("", "Voice");
+        _rail.Add("", "Other PCs");
         _rail.Add("", "Settings");
         _rail.Selected += i => ShowSection(i);
         Controls.Add(_rail);
@@ -164,7 +177,7 @@ internal sealed class SettingsWindow : Form
         Place(_guide, this, "?", Rail + ContentWidth - 16 - 40, 15, 40, 34, PillButton.Looks.Ghost, "The short guide: the modes and how to add screens.");
         _guide.Click += (_, _) => { ShowSection(0); _welcome.Visible = true; _welcome.BringToFront(); };
 
-        foreach (Control page in new Control[] { _homePage, _screensPage, _handsPage, _gamesPage, _settingsPage })
+        foreach (Control page in Pages)
         {
             page.SetBounds(Rail, TopBar, ContentWidth, PageHeight);
             page.Visible = false;
@@ -195,7 +208,8 @@ internal sealed class SettingsWindow : Form
         _screensPage.Controls.Add(_space);
 
         // Stationary mode: the room from above, the easy way to put screens on walls and at distances.
-        _floor.SetBounds(0, 0, ViewWidth, PageHeight - 64);
+        _space.DockHeight = DockHeight;
+        _floor.SetBounds(0, 0, ViewWidth, PageHeight - DockHeight);
         _floor.DockHeight = 0;
         _floor.Font = Font;
         _floor.Visible = false;
@@ -266,6 +280,7 @@ internal sealed class SettingsWindow : Form
             preset.Click += (_, _) => Arrange(how);
             px += 78;
         }
+        BuildLayoutPresets(dockY - 44);
 
         // ---- Screens: the inspector ------------------------------------------------------------------
         var inspector = new System.Windows.Forms.Panel { BackColor = Ui.Inspector };
@@ -283,7 +298,10 @@ internal sealed class SettingsWindow : Form
             page.BackColor = Ui.Inspector;
             inspector.Controls.Add(page);
         }
-        _hint.SetBounds(20, PageHeight - 120, InspectorWidth - 36, 108);
+        _hint.SetBounds(20, PageHeight - 120, InspectorWidth - 36 - 96, 108);
+        Place(_keys, inspector, "Keys", InspectorWidth - 20 - 84, PageHeight - 52, 84, 34, PillButton.Looks.Ghost,
+            "Every Ctrl+Alt key XrShift answers to, from any program, and what each one does.");
+        _keys.Click += (_, _) => ShowKeys();
         _hint.ForeColor = Ui.Muted;
         _hint.BackColor = Ui.Inspector;
         _hint.Font = Ui.Text(8.75f);
@@ -341,6 +359,8 @@ internal sealed class SettingsWindow : Form
         Place(_rate, _pageScreen, "60 Hz", 252, y, 108, 32, PillButton.Looks.Solid,
             "For an extra monitor: 60 Hz for reading, easy on the graphics card. 120 Hz for a screen you play on.");
         _rate.Click += (_, _) => Change(s => s with { RefreshHz = s.RefreshHz >= 100 ? 0 : 120 });
+        y += 44;
+        BuildSizePresets(y);
 
         // Follow options.
         y = 6;
@@ -357,13 +377,16 @@ internal sealed class SettingsWindow : Form
         Place(_focus, _pageFollow, "Keyboard follows", 20, y, 162, 32, PillButton.Looks.Solid,
             "The window the pointer moves to also gets the keyboard, so you can look from a game to your work desktop and type.");
         _focus.Click += (_, _) => ChangeView(s => s with { LookFocus = !s.LookFocus });
-        Place(_toGaze, _pageFollow, "Mouse here now", 188, y, 172, 32, PillButton.Looks.Ghost, "Puts the pointer where you are looking, once. Ctrl+Alt+M.");
+        Place(_toGaze, _pageFollow, "Mouse here now", 188, y, 172, 32, PillButton.Looks.Ghost,
+            $"Puts the pointer where you are looking, once. The same key from any program: {Hotkeys.Text((int)Keys.M)}.");
         _toGaze.Click += (_, _) => MouseToGazeRequested?.Invoke();
-        y += 52;
+        y += 40;
+        Place(_bringNew, _pageFollow, "Bring new windows to where I'm looking", 20, y, 340, 32, PillButton.Looks.Solid,
+            $"A window that opens goes to the monitor of the screen you are looking at, so it never opens out of sight. {Hotkeys.Text((int)Keys.W)} does it for the window in front, once.");
+        _bringNew.Click += (_, _) => ChangeView(s => s with { BringNewWindows = !s.BringNewWindows });
+        y += 48;
         Head(_pageFollow, "All screens", ref y);
-        _zoom = Slider(_pageFollow, "Zoom", ViewSettings.MinZoom * 100, ViewSettings.MaxZoom * 100, 5, 100, 0, " %", false,
-            "Every screen bigger or smaller at once, keeping the arrangement. Ctrl+Alt+PgUp / PgDn from anywhere.", ref y,
-            v => ChangeView(s => s with { Zoom = v / 100f }));
+        BuildZoomSteps(ref y);
         y += 6;
         Place(_dim, _pageFollow, "Dim others", 20, y, 106, 32, PillButton.Looks.Solid,
             "Screens you are not looking at go darker, so the one you read stands out.");
@@ -406,6 +429,9 @@ internal sealed class SettingsWindow : Form
 
         BuildHands();
         BuildGames();
+        BuildBots();
+        BuildVoice();
+        BuildPcs();
         BuildSettings();
 
         AutoScaleDimensions = new SizeF(96f, 96f);
@@ -462,14 +488,9 @@ internal sealed class SettingsWindow : Form
         _ = top;
 
         // The glasses right now, and things you do often.
-        var status = new Card { Title = "Your glasses now", BackColor = Ui.Inspector };
+        var status = new Card { Title = "How things are now", BackColor = Ui.Inspector };
         status.SetBounds(36, top + h + 22, 560, 216);
-        _homeStatus.SetBounds(20, 56, 520, 140);
-        _homeStatus.Text = "Waiting for the glasses.\nPlug them in, set Windows to Extend (Win+P), and XrShift takes it from there.";
-        _homeStatus.Font = Ui.Text(10.5f);
-        _homeStatus.ForeColor = Ui.Muted;
-        _homeStatus.BackColor = Ui.Inspector;
-        status.Controls.Add(_homeStatus);
+        BuildStatus(status);
         _homePage.Controls.Add(status);
 
         var quick = new Card { Title = "Quick actions", BackColor = Ui.Inspector };
@@ -616,6 +637,8 @@ internal sealed class SettingsWindow : Form
         int w = (ContentWidth - 72 - 18) / 2;
         var steady = new Card { Title = "Steadiness", BackColor = Ui.Inspector };
         steady.SetBounds(36, 112, w, 250);
+        BuildSteadiness(steady, w);
+        // Advanced: the four sliders that were all this card had, shown in place of the simple choices when asked for.
         int y = 60;
         _delay = Slider(steady, "Glasses delay", ViewSettings.MinDelayMs, ViewSettings.MaxDelayMs, 0.5f, 0, 1, " ms", true,
             "Screens trail behind when you turn: raise it. They overshoot or jitter as you stop: lower it.", ref y,
@@ -628,6 +651,7 @@ internal sealed class SettingsWindow : Form
             v => ChangeView(s => s with { LevelDeg = v }), w - 40);
         _roll = Slider(steady, "Lean", -ViewSettings.MaxRollDeg, ViewSettings.MaxRollDeg, 0.25f, 0, 2, "°", true,
             "Everything looks rotated: straighten it here.", ref y, v => ChangeView(s => s with { RollDeg = v }), w - 40);
+        ShowAdvanced(false);
         _settingsPage.Controls.Add(steady);
 
         var glasses = new Card { Title = "In the glasses", BackColor = Ui.Inspector };
@@ -678,8 +702,8 @@ internal sealed class SettingsWindow : Form
         _easy = Slider(eyes, "Sharpen text", 0, 100, 5, 0, 0, " %", false,
             "Sharpens edges and adds contrast on every screen. 0 is off.", ref ey, v => ChangeView(s => s with { EasyReading = v / 100f }), 520);
         Place(_bigger, eyes, "Make every screen bigger", 600, 108, 240, 40, PillButton.Looks.Solid,
-            "Every screen 25 % bigger, keeping the arrangement (Zoom on the Screens page). Ctrl+Alt+PgUp / PgDn from anywhere.");
-        _bigger.Click += (_, _) => ChangeView(s => s with { Zoom = MathF.Min(ViewSettings.MaxZoom, MathF.Round(s.Zoom * 1.25f * 20) / 20) });
+            "Every screen one zoom step bigger, keeping the arrangement (Zoom on the Screens page). Ctrl+Alt+PgUp / PgDn from anywhere.");
+        _bigger.Click += (_, _) => ChangeView(s => s with { Zoom = Sizes.ZoomSteps.FirstOrDefault(z => z > s.Zoom + 0.01f, Sizes.ZoomSteps[^1]) });
         _settingsPage.Controls.Add(eyes);
     }
 
@@ -695,10 +719,10 @@ internal sealed class SettingsWindow : Form
 
     void ShowSection(int index)
     {
-        Control[] pages = [_homePage, _screensPage, _handsPage, _gamesPage, _settingsPage];
-        string[] titles = ["Home", "Screens", "Hands", "Games", "Settings"];
+        Control[] pages = Pages;
         index = Math.Clamp(index, 0, pages.Length - 1);
         for (int i = 0; i < pages.Length; i++) pages[i].Visible = i == index;
+        PageShown(index);
         _rail.SelectedIndex = index;
         _pageTitle = index == 1 ? "Screens" : "XrShift";
         _profileBar.Visible = index == 1; // profiles are sets of screens: shown where the screens are
@@ -802,7 +826,7 @@ internal sealed class SettingsWindow : Form
         _viewToggle.BringToFront();
     }
 
-    /// <summary>Brings a page to the front by name: home, screens, stationary, follow, hands, games or settings.</summary>
+    /// <summary>Brings a page to the front by name: home, screens, stationary, follow, hands, games, bots, voice, pcs, settings (or tune), or advanced.</summary>
     public void ShowPageNamed(string name)
     {
         switch (name.ToLowerInvariant())
@@ -812,7 +836,11 @@ internal sealed class SettingsWindow : Form
             case "follow": ShowSection(1); ShowInspector(_pageFollow); break;
             case "hands": ShowSection(2); break;
             case "games": ShowSection(3); break;
-            case "tune" or "settings": ShowSection(4); break;
+            case "bots": ShowSection(BotsIndex); break;
+            case "voice": ShowSection(VoiceIndex); break;
+            case "pcs" or "other" or "network": ShowSection(PcsIndex); break;
+            case "advanced": ShowSection(SettingsIndex); ShowAdvanced(true); break;
+            case "tune" or "settings": ShowSection(SettingsIndex); break;
             default: ShowSection(1); ShowInspector(_pageScreen); break;
         }
     }
@@ -840,13 +868,12 @@ internal sealed class SettingsWindow : Form
     /// <summary>The live numbers at the top right, and the glasses' card on the home page.</summary>
     public void SetLive(string text, bool healthy)
     {
+        _liveText = text;
+        _liveHealthy = healthy;
+        ShowStatus();
         if (_live.Text == text) return;
         _live.Text = text;
         _live.ForeColor = healthy ? Ui.Ink : Ui.Warn;
-        string mode = _vrOn ? "VR" : _gameOn ? "Plain screen" : _glassesStationary ? "Stationary" : "Follow";
-        _homeStatus.Text = healthy
-            ? $"Connected and tracking.\nMode: {mode}.\nGlasses: {text}.\n{_layout.Screens.Count(s => s.Visible)} screens shown{(_virtualNote.Text.Length > 0 ? ", " + _virtualNote.Text : "")}."
-            : $"{char.ToUpper(text[0]) + text[1..]}.\nPlug the glasses in, set Windows to Extend (Win+P), and XrShift takes it from there.";
     }
 
     /// <summary>Selects a screen, e.g. one the app has just added.</summary>
@@ -1188,7 +1215,7 @@ internal sealed class SettingsWindow : Form
             {
                 current = new SourceChoice(spec.Source, spec.Window is { } window
                     ? $"Window: {(window.Title.Length > 0 ? window.Title : window.Program)}"
-                    : "A monitor that is not connected");
+                    : VirtualMonitors.IsVirtualId(spec.DisplayName) ? "An extra monitor (off for now)" : "A monitor that is not connected");
                 _choices.Add(current);
             }
             _source.Text = current.Text;
@@ -1218,6 +1245,7 @@ internal sealed class SettingsWindow : Form
         _shape.Text = virtualMonitor ? name : "Shape (extra monitors)";
         _rate.Text = virtualMonitor && spec!.RefreshHz >= 100 ? "120 Hz" : "60 Hz";
         _rate.On = virtualMonitor && spec!.RefreshHz >= 100;
+        ShowSizePreset(spec);
     }
 
     void UpdateButtons() => _remove.Enabled = _selected is not null && (CanRemove(_selected) || ShowsVirtual(_selected));
@@ -1230,7 +1258,6 @@ internal sealed class SettingsWindow : Form
             _fov.Value = _view.FovDeg;
             _level.Value = _view.LevelDeg;
             _roll.Value = _view.RollDeg;
-            _zoom.Value = _view.Zoom * 100f;
             _held.Value = _view.HeldFovDeg;
             _easy.Value = _view.EasyReading * 100f;
         });
@@ -1253,6 +1280,8 @@ internal sealed class SettingsWindow : Form
         _hands.Text = handsOn ? "Hand gestures: on" : "Hand gestures: off";
         _break.On = _view.BreakMinutes > 0;
         _break.Text = _view.BreakMinutes > 0 ? $"Break reminder: every {_view.BreakMinutes} min" : "Break reminder: off";
+        _bringNew.On = _view.BringNewWindows;
+        ShowNewViewToggles();
     }
 
     string SourceLabel(ScreenSpec spec)
@@ -1260,7 +1289,9 @@ internal sealed class SettingsWindow : Form
         if (spec.Window is { } window) return "window · " + WindowFinder.FriendlyName(window.Program);
         if (spec.DisplayName is not { } id) return "test picture";
         DisplayInfo? d = _sources.FirstOrDefault(x => Same(x.Id, id));
-        if (d is null) return "not connected";
+        // Monitors of another desk are kept aside by the layout (Desks), so only an extra monitor that is not made
+        // right now (plain screen mode removes them) can get here.
+        if (d is null) return VirtualMonitors.IsVirtualId(id) ? "extra monitor · off for now" : "not connected";
         string size = spec.PixelWidth > 0 ? $"{spec.PixelWidth}×{spec.PixelHeight}" : $"{d.Bounds.Width}×{d.Bounds.Height}";
         return VirtualMonitors.IsVirtual(d) ? $"extra monitor · {size}" : $"monitor · {size}";
     }
@@ -1276,6 +1307,7 @@ internal sealed class SettingsWindow : Form
         pill.Hint = hint;
         pill.HintWanted += h => { if (h.Length > 0) _hint.Text = h; };
         pill.MouseLeave += (_, _) => _hint.Text = _defaultHint;
+        if (hint.Length > 0) _tips.SetToolTip(pill, hint);
         parent.Controls.Add(pill);
     }
 
@@ -1299,17 +1331,18 @@ internal sealed class SettingsWindow : Form
         row.Changed += changed;
         row.HintWanted += text => _hint.Text = text;
         row.MouseLeave += (_, _) => _hint.Text = _defaultHint;
+        _tips.SetToolTip(row, hint);
         page.Controls.Add(row);
         y += 36;
         return row;
     }
 
-    /// <summary>A small box asking for a profile name. Null if cancelled.</summary>
-    string? AskName(string current)
+    /// <summary>A small box asking for a name (a profile's, by default). Null if cancelled.</summary>
+    string? AskName(string current, string title = "Profile name")
     {
         using var box = new Form
         {
-            Text = "Profile name", Font = Font, BackColor = Ui.Inspector, ForeColor = Ui.Ink, Icon = AppIcon.Value,
+            Text = title, Font = Font, BackColor = Ui.Inspector, ForeColor = Ui.Ink, Icon = AppIcon.Value,
             FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
             StartPosition = FormStartPosition.CenterParent, ClientSize = new Size(340, 110),
             AutoScaleDimensions = new SizeF(96f, 96f), AutoScaleMode = AutoScaleMode.Dpi,
