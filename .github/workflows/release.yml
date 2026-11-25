@@ -49,4 +49,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$env:TAG""XrShift-kit-${{ env.VERSION }}.zip" --title "XrShift ${{ env.VERSION }}" --generate-notes --verify-tag
+        run: gh release create "$env:TAG" "XrShift-kit-${{ env.VERSION }}.zip" --title "XrShift ${{ env.VERSION }}" --generate-notes --verify-tag
