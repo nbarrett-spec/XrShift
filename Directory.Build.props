@@ -5,7 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <!-- The one version number for every project. A release build overrides it: dotnet build -p:Version=0.3.1 (see docs\RELEASING.md). -->
-    <Version>0.3.1</Version>
+    <Version>0.3.2</Version>
   </PropertyGroup>
 
   <!-- Adds the short git commit to the informational version (0.2.0+abc1234), which is what the app shows after the "+" is
