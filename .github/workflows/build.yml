@@ -11,3 +11,20 @@ jobs:
           dotnet-version: 10.0.x
       - run: dotnet build XrShift.slnx -c Release
       - run: dotnet test XrShift.slnx -c Release --no-build
+
+  # The SteamVR driver is C++; windows-latest has the Visual C++ toolchain, a PC without it does not. A driver
+  # change that does not compile, or does not export HmdDriverFactory, fails here.
+  driver:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and verify the SteamVR driver
+        shell: pwsh
+        run: |
+          ./src/XrShift.SteamVR/build.ps1 -Verify
+          if ($LASTEXITCODE -ne 0) { throw 'driver build failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: steamvr-driver
+          path: src/XrShift.SteamVR/xrshift
+          if-no-files-found: error
