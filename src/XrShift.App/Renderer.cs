@@ -128,7 +128,8 @@ internal sealed class Renderer : IDisposable
     /// graphics cards the frames must be drawn by the card that monitor is plugged into; otherwise Windows
     /// copies every frame between the cards, which costs speed and adds delay.
     /// </param>
-    public Renderer(int width, int height, string? monitor = null)
+    /// <param name="software">Draw with Windows' software renderer even when there is a graphics card (for test pictures).</param>
+    public Renderer(int width, int height, string? monitor = null, bool software = false)
     {
         Width = width;
         Height = height;
@@ -145,8 +146,8 @@ internal sealed class Renderer : IDisposable
                 device = null;
             }
         }
-        if (device is null &&
-            D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport, levels, out device, out context).Failure)
+        if (device is null && (software ||
+            D3D11.D3D11CreateDevice(null, DriverType.Hardware, DeviceCreationFlags.BgraSupport, levels, out device, out context).Failure))
         {
             D3D11.D3D11CreateDevice(null, DriverType.Warp, DeviceCreationFlags.BgraSupport, levels, out device, out context).CheckError();
             Software = true;

@@ -1,0 +1,9 @@
+{
+  // Three stand-in screens 47 degrees apart, seen from a few head directions and modes. Yaw + is left.
+  "frames": [
+    { "name": "three-screens-ahead", "layout": "three-screens.layout.json" },
+    { "name": "three-screens-right-45", "layout": "three-screens.layout.json", "yaw": -45 },
+    { "name": "notice", "layout": "three-screens.layout.json", "notice": "Recentred: the way you face is the front" },
+    { "name": "stereo", "layout": "three-screens.layout.json", "deck": "bots.deck.json", "pitch": -8, "stereo": true }
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "Screens": [
+    { "Id": "left", "Name": "Left", "Source": "test", "YawDeg": 47, "Scale": 0.85, "Distance": 2 },
+    { "Id": "middle", "Name": "Middle", "Source": "test", "YawDeg": 0, "Scale": 0.85, "Distance": 2 },
+    { "Id": "right", "Name": "Right", "Source": "test", "YawDeg": -47, "Scale": 0.85, "Distance": 2 }
+  ]
+}
