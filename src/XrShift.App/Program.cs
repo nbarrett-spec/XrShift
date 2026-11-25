@@ -82,7 +82,7 @@ internal static class Program
             Log.Line(Environment.StackTrace);
         };
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
-        Application.ThreadException += (_, e) => LiveApp.WindowError(e.Exception);
+        LiveApp.GuardLoop();
         AppDomain.CurrentDomain.UnhandledException += (sender, e) =>
         {
             Log.Line("XrShift stopped because of an error on a background thread:");

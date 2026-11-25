@@ -54,6 +54,16 @@ internal static class LiveApp
     /// window of a session that has already ended) is harmless and ignored; anything else ends the message loop
     /// and is thrown from there, so the session's clean-up and restart run as before.
     /// </summary>
+    static readonly ThreadExceptionEventHandler s_onWindowError = (_, e) => WindowError(e.Exception);
+
+    /// <summary>WinForms forgets the handler when a message loop ends, so call this before every Application.Run.
+    /// Without it the unplug bug in .NET 10 (dotnet/winforms#14996) shows the default Continue/Quit box.</summary>
+    public static void GuardLoop()
+    {
+        Application.ThreadException -= s_onWindowError;
+        Application.ThreadException += s_onWindowError;
+    }
+
     public static void WindowError(Exception e)
     {
         if (e is ObjectDisposedException && (e.StackTrace ?? "").Contains("ThreadMethodEntry", StringComparison.Ordinal))
@@ -266,6 +276,7 @@ internal static class LiveApp
             timer.Start();
         };
         timer.Start();
+        GuardLoop();
         Application.Run(context);
         ThrowWindowError();
         timer.Stop();
@@ -2304,6 +2315,7 @@ internal static class LiveApp
         window.FormClosing += (_, _) => presenter.Stop();
         try
         {
+            GuardLoop();
             Application.Run(window);
         }
         finally
