@@ -39,6 +39,8 @@ public sealed record SceneObject
     public DateTime SeenAt { get; init; }
     /// <summary>A bot on another PC that said it was working and then went quiet: shown as offline, never as still working.</summary>
     public bool Offline { get; init; }
+    /// <summary>The last thing a bot said or was asked, for its card. Never more than a couple of lines.</summary>
+    public string Note { get; init; } = "";
 
     /// <summary>How wide an object looks, in degrees.</summary>
     public const float SizeDeg = 7f;
@@ -77,6 +79,7 @@ public sealed record Deck
 
     /// <summary>How long a working bot on another PC may say nothing before it is shown as offline.</summary>
     public static readonly TimeSpan RemoteQuiet = TimeSpan.FromMinutes(10);
+    const int MaxNote = 160;
 
     public IReadOnlyList<SceneObject> Objects { get; init; } = [];
 
@@ -96,7 +99,7 @@ public sealed record Deck
     /// What a Claude Code hook event does to the bot of that session. An event from a session not seen before
     /// makes its bot first, so a session that was already running when the app started still shows up.
     /// </summary>
-    public Deck Report(string id, string hookEvent, string? label = null, int? pid = null, string? pc = null, DateTime now = default)
+    public Deck Report(string id, string hookEvent, string? label = null, int? pid = null, string? pc = null, DateTime now = default, string? note = null)
     {
         if (hookEvent == "SessionEnd") return Remove(id);
         SceneObject bot = Find(id) ?? new SceneObject { Id = id };
@@ -119,6 +122,8 @@ public sealed record Deck
             Pc = pc ?? bot.Pc,
             SeenAt = string.IsNullOrEmpty(pc ?? bot.Pc) ? bot.SeenAt : now,
             Offline = false,
+            // What it last said or was asked: shown on its card. A finished bot keeps the note it finished with.
+            Note = string.IsNullOrWhiteSpace(note) ? bot.Note : note.Trim() is { Length: > MaxNote } longNote ? longNote[..MaxNote] + "..." : note.Trim(),
         };
         return changed == Find(id) ? this : With(changed);
     }
@@ -167,15 +172,12 @@ public sealed record Deck
 
     static Deck Arranged(List<SceneObject> objects)
     {
-        // Slots 0, -1, +1, -2, +2 ... steps from the middle; yaw + is to the left, so the second object goes right.
-        int slot = 0;
-        for (int i = 0; i < objects.Count; i++)
-        {
-            if (objects[i].Placed) continue;
-            int step = (slot + 1) / 2 * (slot % 2 == 1 ? -1 : 1);
-            slot++;
-            objects[i] = objects[i] with { YawDeg = step * RowStepDeg, PitchDeg = RowPitchDeg };
-        }
+        // One row centred on straight ahead, read left to right: this PC's bots first, then each other PC's in
+        // turn, so the bots of one PC always sit together. Yaw + is to the left.
+        List<int> row = Enumerable.Range(0, objects.Count).Where(i => !objects[i].Placed)
+            .OrderBy(i => objects[i].Pc, StringComparer.OrdinalIgnoreCase).ThenBy(i => i).ToList();
+        for (int k = 0; k < row.Count; k++)
+            objects[row[k]] = objects[row[k]] with { YawDeg = ((row.Count - 1) / 2f - k) * RowStepDeg, PitchDeg = RowPitchDeg };
         return new Deck { Objects = objects };
     }
 }

@@ -348,6 +348,29 @@ internal sealed class SpaceScene : IDisposable
     }
 
     readonly Dictionary<string, LiveObject> _objects = [];
+    SceneItem? _card;
+    string _cardShown = "";
+
+    /// <summary>Shows the card of the bot being looked at, just above it, and hides it when the wearer looks away.</summary>
+    void ShowCard(System.Numerics.Vector3 gaze, bool blank)
+    {
+        float yaw = MathF.Atan2(-gaze.X, -gaze.Z) * 180f / MathF.PI, pitch = MathF.Asin(Math.Clamp(gaze.Y, -1f, 1f)) * 180f / MathF.PI;
+        SceneObject? o = blank ? null : _deck?.Nearest(yaw, pitch);
+        if (_card is not null) _card.Visible = o is not null;
+        if (o is null) return;
+        string key = $"{o.Id}|{o.Label}|{o.State}|{o.Offline}|{o.Pc}|{o.Note}|{o.YawDeg}|{o.PitchDeg}|{o.Distance}";
+        if (key == _cardShown && _card is not null) return;
+        _cardShown = key;
+        float distance = MathF.Max(o.Distance - 0.1f, 0.2f), width = 2f * distance * MathF.Tan(9f * MathF.PI / 180f);
+        var panel = new Panel { YawDeg = o.YawDeg, PitchDeg = o.PitchDeg + 9.5f, Distance = distance, Width = width, Height = width * Pictures.CardHeight / Pictures.CardWidth };
+        using Bitmap picture = Pictures.Card(o);
+        if (_card is null) _card = _renderer.Add(PanelMesh.Build(panel), picture, distance: distance);
+        else
+        {
+            _renderer.SetMesh(_card, PanelMesh.Build(panel), distance);
+            _renderer.SetPicture(_card, picture);
+        }
+    }
     Deck? _deck;
     float _time;
 
@@ -417,6 +440,7 @@ internal sealed class SpaceScene : IDisposable
             screen.Item.Contrast = 1f + easyReading * 0.3f;
         }
         System.Numerics.Vector3 gaze = System.Numerics.Vector3.Transform(-System.Numerics.Vector3.UnitZ, head);
+        ShowCard(gaze, blank);
         LiveScreen? looked = null;
         if (dim)
         {

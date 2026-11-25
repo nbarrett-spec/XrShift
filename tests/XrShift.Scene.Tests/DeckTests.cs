@@ -69,24 +69,24 @@ public class DeckTests
     }
 
     [Fact]
-    public void UnplacedObjectsLineUpFromTheMiddleAndPlacedOnesStayPut()
+    public void UnplacedObjectsLineUpLeftToRightAndPlacedOnesStayPut()
     {
         Deck deck = new Deck()
             .With(new SceneObject { Id = "a" })
             .With(new SceneObject { Id = "p", YawDeg = 40, PitchDeg = 5, Placed = true })
             .With(new SceneObject { Id = "b" })
             .With(new SceneObject { Id = "c" });
-        Assert.Equal([0f, 40f, -Deck.RowStepDeg, Deck.RowStepDeg], deck.Objects.Select(o => o.YawDeg));
+        Assert.Equal([Deck.RowStepDeg, 40f, 0f, -Deck.RowStepDeg], deck.Objects.Select(o => o.YawDeg));
         Assert.Equal(5f, deck.Find("p")!.PitchDeg);
-        // Closing the middle one closes the gap.
-        Assert.Equal([40f, 0f, -Deck.RowStepDeg], deck.Remove("a").Objects.Select(o => o.YawDeg));
+        // Removing one closes the gap and keeps the row centred.
+        Assert.Equal([40f, Deck.RowStepDeg / 2, -Deck.RowStepDeg / 2], deck.Remove("a").Objects.Select(o => o.YawDeg));
     }
 
     [Fact]
     public void FindsTheObjectBeingLookedAt()
     {
         Deck deck = new Deck().With(new SceneObject { Id = "a" }).With(new SceneObject { Id = "b" });
-        Assert.Equal("b", deck.Nearest(-Deck.RowStepDeg + 1, Deck.RowPitchDeg - 2)!.Id);
+        Assert.Equal("b", deck.Nearest(-Deck.RowStepDeg / 2 + 1, Deck.RowPitchDeg - 2)!.Id);
         Assert.Null(deck.Nearest(60, 0));
     }
 
@@ -115,5 +115,29 @@ public class DeckTests
         Assert.Same(waiting, waiting.Sweep(_ => false, Noon.AddHours(5)));
         Deck done = new Deck().Report("r2", "Stop", pc: "DESK", now: Noon);
         Assert.Same(done, done.Sweep(_ => false, Noon.AddHours(5)));
+    }
+
+    [Fact]
+    public void ABotRemembersWhatItLastSaidAndLongTextIsCut()
+    {
+        Deck deck = new Deck().Report("s1", "UserPromptSubmit", note: "fix the invoice export");
+        Assert.Equal("fix the invoice export", deck.Find("s1")!.Note);
+        deck = deck.Report("s1", "PostToolUse", note: "using Bash").Report("s1", "PostToolUse");
+        Assert.Equal("using Bash", deck.Find("s1")!.Note); // an event with nothing to say leaves the last note
+        deck = deck.Report("s1", "Notification", note: new string('x', 500));
+        Assert.Equal(163, deck.Find("s1")!.Note.Length);
+    }
+
+    [Fact]
+    public void BotsOfOnePcSitTogether()
+    {
+        Deck deck = new Deck()
+            .Report("a", "Stop", pc: "DESK", now: Noon)
+            .Report("b", "Stop")
+            .Report("c", "Stop", pc: "DESK", now: Noon)
+            .Report("d", "Stop");
+        // Left to right: this PC's two, then the other PC's two.
+        string[] leftToRight = deck.Objects.OrderByDescending(o => o.YawDeg).Select(o => o.Id).ToArray();
+        Assert.Equal(["b", "d", "a", "c"], leftToRight);
     }
 }

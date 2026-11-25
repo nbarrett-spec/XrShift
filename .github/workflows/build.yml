@@ -1,0 +1,13 @@
+# Builds the solution and runs the tests on every push, so a change that breaks the fork is seen at once.
+name: build
+on: [push, pull_request]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - run: dotnet build XrShift.slnx -c Release
+      - run: dotnet test XrShift.slnx -c Release --no-build

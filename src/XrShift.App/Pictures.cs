@@ -164,6 +164,8 @@ internal static class Pictures
             const float disc = 132, left = (ObjectSize - disc) / 2f, top = 18;
             using (var glow = new SolidBrush(Color.FromArgb(60, colour))) g.FillEllipse(glow, left - 14, top - 14, disc + 28, disc + 28);
             using (var fill = new SolidBrush(colour)) g.FillEllipse(fill, left, top, disc, disc);
+            // A bot on another PC wears that PC's colour as a ring.
+            if (o.Pc.Length > 0) { using var ring = new Pen(PcColour(o.Pc), 7f); g.DrawEllipse(ring, left - 7, top - 7, disc + 14, disc + 14); }
             using var ink = new SolidBrush(Color.FromArgb(240, 243, 250));
             using var dark = new SolidBrush(Color.FromArgb(10, 13, 20));
             var centred = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
@@ -179,9 +181,51 @@ internal static class Pictures
             using Font state = Face(22);
             string what = o.Offline ? "offline" : o.State == XrShift.Scene.BotState.NeedsYou ? "needs you" : XrShift.Scene.SceneObject.StateName(o.State);
             // A bot on another PC says which one, so the wearer knows where an answer has to be typed.
-            g.DrawString(o.Pc.Length > 0 ? $"{what} Â· {o.Pc}" : what, state, ink, new RectangleF(0, top + disc + 62, ObjectSize, 30), centred);
+            g.DrawString(o.Pc.Length > 0 ? $"{what} on {o.Pc}" : what, state, ink, new RectangleF(0, top + disc + 62, ObjectSize, 30), centred);
         }
         return picture;
+    }
+
+    public const int CardWidth = 640, CardHeight = 240;
+
+    /// <summary>What a bot is doing, shown above it while the wearer looks at it: its name, state, PC and the last thing it said or was asked.</summary>
+    public static Bitmap Card(XrShift.Scene.SceneObject o)
+    {
+        Bitmap picture = NewPicture(CardWidth, CardHeight, out Graphics g);
+        using (g)
+        {
+            g.Clear(Color.Transparent);
+            using (GraphicsPath back = Ui.Rounded(new RectangleF(4, 4, CardWidth - 8, CardHeight - 8), 22))
+            using (var fill = new SolidBrush(Color.FromArgb(235, 16, 20, 30)))
+            using (var edge = new Pen(o.Pc.Length > 0 ? PcColour(o.Pc) : Color.FromArgb(94, 234, 212), 3f))
+            {
+                g.FillPath(fill, back);
+                g.DrawPath(edge, back);
+            }
+            using var ink = new SolidBrush(Color.FromArgb(240, 243, 250));
+            using var soft = new SolidBrush(Color.FromArgb(170, 180, 198));
+            var oneLine = new StringFormat { Trimming = StringTrimming.EllipsisCharacter, FormatFlags = StringFormatFlags.NoWrap };
+            var wrapped = new StringFormat { Trimming = StringTrimming.EllipsisWord };
+            using Font title = Face(34, FontStyle.Bold);
+            using Font small = Face(24);
+            using Font body = Face(26);
+            string what = o.Offline ? "offline" : o.State == XrShift.Scene.BotState.NeedsYou ? "needs you" : XrShift.Scene.SceneObject.StateName(o.State);
+            g.DrawString(o.Label, title, ink, new RectangleF(26, 20, CardWidth - 52, 44), oneLine);
+            g.DrawString(o.Pc.Length > 0 ? $"{what} on {o.Pc}" : what, small, soft, new RectangleF(28, 66, CardWidth - 56, 32), oneLine);
+            g.DrawString(o.Note.Length > 0 ? o.Note : "Nothing reported yet.", body, o.Note.Length > 0 ? ink : soft, new RectangleF(28, 108, CardWidth - 56, CardHeight - 128), wrapped);
+        }
+        return picture;
+    }
+
+    /// <summary>A steady colour for each PC name, so its bots are recognised at a glance. The same on every run and every PC.</summary>
+    static Color PcColour(string pc)
+    {
+        int sum = 0;
+        foreach (char c in pc.ToUpperInvariant()) sum = (sum * 31 + c) % 360;
+        // Hue to colour at full strength, a little lightened so it reads on black.
+        float h = sum / 60f, x = 1 - MathF.Abs(h % 2 - 1);
+        (float r, float gr, float b) = ((int)h) switch { 0 => (1f, x, 0f), 1 => (x, 1f, 0f), 2 => (0f, 1f, x), 3 => (0f, x, 1f), 4 => (x, 0f, 1f), _ => (1f, 0f, x) };
+        return Color.FromArgb((int)(90 + r * 165), (int)(90 + gr * 165), (int)(90 + b * 165));
     }
 
     static Bitmap NewPicture(int width, int height, out Graphics g)

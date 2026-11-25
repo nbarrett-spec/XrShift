@@ -139,7 +139,7 @@ public static class ControlApi
                     int? pid = p!["pid"] is JsonValue v && v.TryGetValue(out int n) && n > 0 ? n : null;
                     // A report that names a PC came over the network: that PC's process numbers mean nothing here.
                     string? pc = Text(p, "pc");
-                    host.Use(host.Deck.Report(session, hookEvent, Text(p, "label"), pc is null ? pid : null, pc, DateTime.UtcNow));
+                    host.Use(host.Deck.Report(session, hookEvent, Text(p, "label"), pc is null ? pid : null, pc, DateTime.UtcNow, Text(p, "note")));
                     result = new JsonObject { ["state"] = host.Deck.Find(session) is { } bot ? SceneObject.StateName(bot.State) : null };
                     break;
                 }
@@ -221,6 +221,7 @@ public static class ControlApi
                 ["position"] = new JsonObject { ["yawDeg"] = o.YawDeg, ["pitchDeg"] = o.PitchDeg, ["distance"] = o.Distance },
                 ["state"] = o.Offline ? "offline" : SceneObject.StateName(o.State),
                 ["pc"] = o.Pc,
+                ["note"] = o.Note,
                 ["badge"] = o.Badge,
             });
         }

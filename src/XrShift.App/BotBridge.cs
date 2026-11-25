@@ -105,7 +105,12 @@ internal static class BotHook
             {
                 ["jsonrpc"] = "2.0",
                 ["method"] = "bot.report",
-                ["params"] = new JsonObject { ["id"] = session, ["event"] = hookEvent, ["label"] = folder, ["pid"] = BotProcess.SessionAncestor() },
+                ["params"] = new JsonObject
+                {
+                    ["id"] = session, ["event"] = hookEvent, ["label"] = folder, ["pid"] = BotProcess.SessionAncestor(),
+                    // What the bot's card shows: the question it is waiting on, what it was asked, or the tool it just used.
+                    ["note"] = hookEvent switch { "Notification" => Text("message"), "UserPromptSubmit" => Text("prompt"), "PostToolUse" => Text("tool_name") is { } tool ? $"using {tool}" : null, "Stop" => "finished", _ => null },
+                },
             };
 
             try
