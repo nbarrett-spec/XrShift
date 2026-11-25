@@ -189,8 +189,12 @@ internal sealed partial class SettingsWindow
             Place(_aheadPills[i], steady, name, 20 + i * 136, 108, 130, 36, PillButton.Looks.Solid, hint);
             _aheadPills[i].Click += (_, _) => ChangeView(s => s with { LookAheadMs = ms });
         }
-        Place(_calibrate, steady, "Calibrate", 20, 156, 130, 36, PillButton.Looks.Ghost, "Guided calibration arrives in the next update");
-        _calibrate.Inert = true;
+        Place(_calibrate, steady, "Calibrate", 20, 156, 130, 36, PillButton.Looks.Ghost, NotReadyHint);
+        _calibrate.Click += (_, _) =>
+        {
+            if (_setupReady || _setupRunning) ShowCalibration();
+            else Tell(NotReadyHint);
+        };
         _steadyNote.SetBounds(166, 156, w - 186, 80);
         _steadyNote.ForeColor = Ui.Muted;
         _steadyNote.BackColor = Ui.Inspector;
@@ -199,6 +203,133 @@ internal sealed partial class SettingsWindow
         Place(_advancedToggle, steady, "Advanced  ▾", w - 20 - 140, 14, 140, 32, PillButton.Looks.Ghost,
             "The four fine controls: glasses delay, view angle, level and lean. Double-click a slider to put it back.");
         _advancedToggle.Click += (_, _) => ShowAdvanced(!_advancedOn);
+    }
+
+    // ---- Settings: glasses setup ------------------------------------------------------------------
+
+    const string NotReadyHint = "Glasses setup needs the glasses connected and sending head motion: plug them in, wait until the top of this window shows fps, then click Calibrate.";
+    const string ReadyHint = "Glasses setup, guided in the glasses: the gyro's resting reading, the sensor axes, then level, lean and view angle from upright edges in your room. Ctrl+Alt+C.";
+
+    /// <summary>The wearer asked to start glasses setup from this step.</summary>
+    public event Action<SetupStepKind>? CalibrationStartRequested;
+    /// <summary>press, retry, skip, cancel or undo: the same as the keys in the glasses.</summary>
+    public event Action<string>? CalibrationAction;
+
+    readonly Card _setupCard = new()
+    {
+        Title = "Glasses setup",
+        Subtitle = "Put the glasses on: everything you need is shown in them. Space or Enter confirms, Backspace retries a step, S skips it, Esc cancels and puts everything back.",
+        BackColor = Ui.Inspector,
+    };
+    readonly PillButton[] _setupFrom = [new(), new(), new(), new()];
+    readonly PillButton _setupStart = new(), _setupClose = new(), _setupConfirm = new(), _setupRetry = new(), _setupSkip = new(), _setupCancel = new(), _setupUndo = new();
+    readonly Label _setupStep = new(), _setupSays = new(), _setupNote = new(), _setupResults = new();
+    SetupStepKind _setupStartAt = SetupStepKind.Rest;
+    bool _setupReady, _setupRunning;
+    Control[] _setupCovers = [];
+
+    /// <summary>The panel sits where <paramref name="covers"/> are, which are hidden while it shows.</summary>
+    void BuildSetupPanel(Control[] covers)
+    {
+        _setupCovers = covers;
+        int top = covers.Min(c => c.Top), bottom = covers.Max(c => c.Bottom);
+        _setupCard.SetBounds(36, top, ContentWidth - 72, bottom - top);
+        int w = _setupCard.Width;
+
+        var from = new Label { Text = "Start from", ForeColor = Ui.Muted, BackColor = Ui.Inspector, Font = Ui.Text(10f) };
+        from.SetBounds(20, 114, 100, 30);
+        _setupCard.Controls.Add(from);
+        string[] names = ["Resting reading", "Axes", "Level and lean", "View angle"];
+        int[] widths = [150, 80, 140, 120];
+        for (int i = 0, x = 120; i < names.Length; x += widths[i] + 6, i++)
+        {
+            var step = (SetupStepKind)i;
+            Place(_setupFrom[i], _setupCard, names[i], x, 108, widths[i], 34, PillButton.Looks.Solid, $"Start glasses setup at {names[i].ToLowerInvariant()}, keeping what was measured before it.");
+            _setupFrom[i].Click += (_, _) => { _setupStartAt = step; ShowSetupButtons(); };
+        }
+        Place(_setupStart, _setupCard, "Start", w - 20 - 120 - 8 - 100, 108, 120, 34, PillButton.Looks.Accent, "Starts glasses setup. Then follow what the glasses show.");
+        _setupStart.Click += (_, _) => CalibrationStartRequested?.Invoke(_setupStartAt);
+        Place(_setupClose, _setupCard, "Close", w - 20 - 100, 108, 100, 34, PillButton.Looks.Ghost, "Hides this panel. Calibrate opens it again.");
+        _setupClose.Click += (_, _) => ShowCalibration(false);
+
+        foreach ((Label label, int y, int height, Color colour, float size) in new[]
+                 {
+                     (_setupStep, 154, 22, Ui.Accent, 10.5f), (_setupSays, 178, 46, Ui.Ink, 10f),
+                     (_setupNote, 226, 22, Ui.Warn, 10f), (_setupResults, 250, 48, Ui.Muted, 9f),
+                 })
+        {
+            label.SetBounds(20, y, w - 40, height);
+            label.ForeColor = colour;
+            label.BackColor = Ui.Inspector;
+            label.Font = Ui.Text(size);
+            _setupCard.Controls.Add(label);
+        }
+
+        (PillButton Pill, string Text, string Action, string Hint)[] buttons =
+        [
+            (_setupConfirm, "Confirm", "press", "The same as Space or Enter: passes the mode check, takes a press with your head as it is now, or closes the finished setup."),
+            (_setupRetry, "Retry", "retry", "The same as Backspace: this step again from its start."),
+            (_setupSkip, "Skip", "skip", "The same as S: leaves this step as it is and goes on."),
+            (_setupCancel, "Cancel", "cancel", "The same as Esc: stops, and puts back everything this setup changed."),
+        ];
+        int bx = 20;
+        foreach ((PillButton pill, string text, string action, string hint) in buttons)
+        {
+            Place(pill, _setupCard, text, bx, bottom - top - 54, 120, 36, pill == _setupConfirm ? PillButton.Looks.Accent : PillButton.Looks.Solid, hint);
+            pill.Click += (_, _) => CalibrationAction?.Invoke(action);
+            bx += 126;
+        }
+        Place(_setupUndo, _setupCard, "Undo calibration", w - 20 - 190, bottom - top - 54, 190, 36, PillButton.Looks.Ghost,
+            "Puts view angle, level, lean, the sensor axes and the gyro reading back as they were before the last glasses setup. Offered until XrShift quits.");
+        _setupUndo.Click += (_, _) => CalibrationAction?.Invoke("undo");
+
+        _setupCard.Visible = false;
+        _settingsPage.Controls.Add(_setupCard);
+        _setupCard.BringToFront();
+        SetCalibration(null, false, [], "");
+    }
+
+    /// <summary>Opens (or hides) the glasses setup panel on the Settings page.</summary>
+    public void ShowCalibration(bool on = true)
+    {
+        if (on) ShowSection(SettingsIndex);
+        _setupCard.Visible = on;
+        foreach (Control c in _setupCovers) c.Visible = !on;
+    }
+
+    /// <summary>Whether the glasses are connected and tracking, so setup can start.</summary>
+    public void SetCalibrationReady(bool ready)
+    {
+        if (ready == _setupReady) return;
+        _setupReady = ready;
+        _calibrate.Hint = ready ? ReadyHint : NotReadyHint;
+        _tips.SetToolTip(_calibrate, _calibrate.Hint);
+        ShowSetupButtons();
+    }
+
+    /// <summary>Where glasses setup is (null screen: not running), what it found, and why the last request was refused.</summary>
+    public void SetCalibration(SetupScreen? screen, bool canUndo, IReadOnlyList<string> results, string message)
+    {
+        _setupRunning = screen is not null;
+        _setupUndo.Enabled = canUndo && !_setupRunning;
+        Show(_setupStep, screen?.Progress ?? (_setupReady ? "Not running. Choose where to start, then Start." : "Not running: " + NotReadyHint));
+        Show(_setupSays, screen?.Instruction ?? "");
+        Show(_setupNote, message.Length > 0 ? message : screen?.Note ?? "");
+        Show(_setupResults, string.Join("\n", results.TakeLast(3)));
+        ShowSetupButtons();
+
+        static void Show(Label label, string text) { if (label.Text != text) label.Text = text; }
+    }
+
+    void ShowSetupButtons()
+    {
+        for (int i = 0; i < _setupFrom.Length; i++)
+        {
+            _setupFrom[i].On = (int)_setupStartAt == i;
+            _setupFrom[i].Enabled = !_setupRunning;
+        }
+        _setupStart.Enabled = _setupReady && !_setupRunning;
+        foreach (PillButton pill in (PillButton[])[_setupConfirm, _setupRetry, _setupSkip, _setupCancel]) pill.Enabled = _setupRunning;
     }
 
     void ShowAdvanced(bool on)

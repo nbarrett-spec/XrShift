@@ -104,8 +104,14 @@ internal sealed class ControlApiServer : IDisposable
 
 /// <summary>The live session, as the Control API sees it. Every member runs on the window thread.</summary>
 internal sealed class ControlHost(Func<Workspace> workspace, Action<Workspace> useWorkspace, Func<Deck> deck, Action<Deck> useDeck, Action<string> focus, Func<string, string, string?> tell, Func<string, Uri, string?> openWidget,
-    Func<ScreenSpec, (int Width, int Height)> pictureSize, Func<DisplayOptics> optics) : IControlHost
+    Func<ScreenSpec, (int Width, int Height)> pictureSize, Func<DisplayOptics> optics,
+    Func<string, string?, (System.Text.Json.Nodes.JsonObject? State, string? Refused)> calibrate) : IControlHost
 {
+    public System.Text.Json.Nodes.JsonObject? Calibrate(string action, string? from, out string? refused)
+    {
+        (System.Text.Json.Nodes.JsonObject? state, refused) = calibrate(action, from);
+        return state;
+    }
     /// <summary>The real size of the monitor or window a screen shows, so presets size it as it will be drawn.</summary>
     public (int Width, int Height) PictureSize(ScreenSpec screen) => pictureSize(screen);
     /// <summary>The view angle in use now (the held picture's in stationary mode).</summary>

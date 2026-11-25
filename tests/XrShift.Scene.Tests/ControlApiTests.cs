@@ -18,6 +18,48 @@ public class ControlApiTests : IControlHost
     string? IControlHost.Tell(string id, string text) { _told.Add($"{id}: {text}"); return null; }
     readonly List<string> _widgets = [];
     string? IControlHost.OpenWidget(string label, Uri page) { _widgets.Add($"{label} -> {page}"); return null; }
+    readonly List<string> _setup = [];
+    System.Text.Json.Nodes.JsonObject? IControlHost.Calibrate(string action, string? from, out string? refused)
+    {
+        _setup.Add(from is null ? action : $"{action} {from}");
+        refused = action == "undo" ? "There is no glasses setup to undo." : null;
+        return refused is null ? new System.Text.Json.Nodes.JsonObject { ["active"] = action != "cancel" } : null;
+    }
+
+    [Fact]
+    public void GlassesSetupIsDrivenStepByStep()
+    {
+        Assert.True(Call("""{"jsonrpc":"2.0","id":1,"method":"calibration.start","params":{"from":"level"}}""").GetProperty("result").GetProperty("active").GetBoolean());
+        foreach (string action in new[] { "press", "retry", "skip", "status", "cancel" })
+            Assert.True(Call($$"""{"jsonrpc":"2.0","id":2,"method":"calibration.{{action}}"}""").TryGetProperty("result", out _));
+        Assert.Equal(["start level", "press", "retry", "skip", "status", "cancel"], _setup);
+
+        JsonElement refused = Call("""{"jsonrpc":"2.0","id":3,"method":"calibration.undo"}""").GetProperty("error");
+        Assert.Equal("There is no glasses setup to undo.", refused.GetProperty("message").GetString());
+        Assert.Equal(-32602, Call("""{"jsonrpc":"2.0","id":4,"method":"calibration.start","params":{"from":"ears"}}""").GetProperty("error").GetProperty("code").GetInt32());
+        Assert.Equal(7, _setup.Count); // the bad start never reached the app
+        Assert.Equal(-32601, Call("""{"jsonrpc":"2.0","id":5,"method":"calibration.explode"}""").GetProperty("error").GetProperty("code").GetInt32());
+    }
+
+    [Fact]
+    public void WithoutTheAppGlassesSetupSaysWhatItNeeds()
+    {
+        string reply = ControlApi.Handle("""{"jsonrpc":"2.0","id":1,"method":"calibration.status"}""", new Bare(), out _)!;
+        Assert.Contains("needs the running app", reply);
+    }
+
+    sealed class Bare : IControlHost
+    {
+        public Workspace Workspace => new();
+        public void Use(Workspace changed) { }
+        public Deck Deck => new();
+        public void Use(Deck changed) { }
+        public void Focus(string id) { }
+        public IReadOnlyList<string> Projects => [];
+        public string? Spawn(string project) => null;
+        public string? Tell(string id, string text) => null;
+        public string? OpenWidget(string label, Uri page) => null;
+    }
 
     [Fact]
     public void AWidgetOpensOnlyForARealWebAddress()

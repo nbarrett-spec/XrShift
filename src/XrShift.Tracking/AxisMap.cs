@@ -145,6 +145,22 @@ public static class TrackingConfig
         File.WriteAllText(AxesPath, map.ToString());
     }
 
+    /// <summary>The measured mounting if one is saved; null when the usual one is in use.</summary>
+    public static AxisMap? SavedAxes()
+    {
+        try { return File.Exists(AxesPath) && AxisMap.TryParse(File.ReadAllText(AxesPath), out AxisMap map) ? map : null; }
+        catch (IOException) { return null; }
+    }
+
+    /// <summary>Puts the saved mounting and gyro offset back as given: saved, or the file removed for null.</summary>
+    public static void Restore(AxisMap? axes, Vector3? bias)
+    {
+        if (axes is { } map) SaveAxes(map);
+        else if (File.Exists(AxesPath)) File.Delete(AxesPath);
+        if (bias is { } b) SaveGyroBias(b);
+        else if (File.Exists(GyroPath)) File.Delete(GyroPath);
+    }
+
     /// <summary>The gyro's resting offset (rad/s) from the last time it was measured, if any.</summary>
     public static bool TryLoadGyroBias(out Vector3 bias)
     {

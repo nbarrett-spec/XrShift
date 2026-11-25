@@ -37,6 +37,10 @@ internal static class LiveApp
         public volatile string CaptureRates = "";
         /// <summary>Spots to point the wearer's eye to (the mouse pointer, a window that just opened). Written by the window thread.</summary>
         public volatile Mark[] Marks = [];
+        /// <summary>Glasses setup while it runs (null otherwise). Fed samples on the reader thread: always used under its own lock.</summary>
+        public volatile SetupRun? Calibration;
+        /// <summary>What setup shows in the glasses now; while set, nothing else is drawn. Written by the window thread.</summary>
+        public volatile SetupScreen? Guide;
     }
 
     static bool s_unplugged;
@@ -381,12 +385,15 @@ internal static class LiveApp
         link.Sample += s =>
         {
             tracker.Update(s);
+            if (shared.Calibration is { } run) lock (run) run.Add(s); // the same samples the tracker gets
             if (vrBridge is { } vr && tracker.HasPose) vr.Publish(tracker.GetPose(0.012f).Orientation);
         };
         Thread reader = link.Start(cts.Token);
 
         // ---- the scene window ----------------------------------------------------------------
-        using var window = new ViewWindow(area, fullScreen);
+        // --no-keys: a trial driven by a script takes no keys and never the keyboard, so the person at the PC types on undisturbed.
+        bool keys = !args.Contains("--no-keys");
+        using var window = new ViewWindow(area, fullScreen, takeFocus: keys);
         if (direct)
         {
             // In direct mode this window only carries the keys and the message loop: out of sight, never in the way.
@@ -413,8 +420,8 @@ internal static class LiveApp
         // ---- keys ------------------------------------------------------------------------------
         // The keys and what they do are one list (Hotkeys), which the settings window's key reference shows too.
         // Recentre gets three tries, because other programs often hold one of them already.
-        List<string> recentreNames = Hotkeys.All.Where(k => k.Recentre && window.AddHotKey((Keys)k.Code)).Select(k => k.Name).ToList();
-        List<string> taken = Hotkeys.All.Where(k => !k.Recentre && !window.AddHotKey((Keys)k.Code)).Select(k => k.Name).ToList();
+        List<string> recentreNames = Hotkeys.All.Where(k => keys && k.Recentre && window.AddHotKey((Keys)k.Code)).Select(k => k.Name).ToList();
+        List<string> taken = Hotkeys.All.Where(k => keys && !k.Recentre && !window.AddHotKey((Keys)k.Code)).Select(k => k.Name).ToList();
         string recentreKey = recentreNames.Count > 0 ? $"Ctrl+Alt+{recentreNames[0]}" : "Space";
         Log.Line("Keys, from any program: " + string.Join("; ", Hotkeys.Reference().Select(r => $"{r.Keys} {r.What}")) + ".");
         if (taken.Count > 0)
@@ -539,8 +546,9 @@ internal static class LiveApp
         Action listen = () => { };
         Func<string, Uri, string?> openWidget = (_, _) => "Not ready yet.";
         Func<ScreenSpec, (int, int)> pictureSizeOf = _ => (1920, 1080);
+        Func<string, string?, (System.Text.Json.Nodes.JsonObject?, string?)> calibrate = (_, _) => (null, "Not ready yet.");
         var host = new ControlHost(() => workspace, UseWorkspace, () => deck, UseDeck, id => openObject(id), (id, text) => tellBot(id, text), (label, page) => openWidget(label, page),
-            s => pictureSizeOf(s), () => OpticsFor(view));
+            s => pictureSizeOf(s), () => OpticsFor(view), (action, from) => calibrate(action, from));
         // A trial window (--window, --seconds) may run beside the real app: it only has the API when asked, under
         // its own name, so hooks and scripts always reach the real one.
         bool trialRun = args.Contains("--window") || Program.Number(args, "--seconds", 0) > 0;
@@ -631,6 +639,7 @@ internal static class LiveApp
             settings.SetLive(gameMode ? "game mode"
                 : tracking ? string.Create(CultureInfo.InvariantCulture, $"{presenter.FramesPerSecond:F0} fps · {presenter.PoseToScreenMs:F0} ms")
                 : "no head tracking", tracking || gameMode);
+            settings.SetCalibrationReady(tracking && !gameMode);
         };
         liveTimer.Start();
 
@@ -994,7 +1003,7 @@ internal static class LiveApp
                 handAnchor = null;
                 return;
             }
-            if (!view.LookPointer || gameMode || blank || shared.HoldHead)
+            if (!view.LookPointer || gameMode || blank || shared.HoldHead || shared.Calibration is not null)
             {
                 gazeOn = focusedOn = null;
                 handAnchor = null;
@@ -1280,7 +1289,7 @@ internal static class LiveApp
         var roomTimer = new System.Windows.Forms.Timer(parts) { Interval = 50 };
         roomTimer.Tick += (_, _) =>
         {
-            if (!stationary || gameMode || blank || !tracker.HasPose) return;
+            if (!stationary || gameMode || blank || !tracker.HasPose || shared.Calibration is not null) return;
             double time = clock.Elapsed.TotalSeconds;
             (float yaw, float pitch) = HeadDirection();
             if (Apart(yaw, pitch, steadyFrom.Yaw, steadyFrom.Pitch) > 4f) { steadyFrom = (yaw, pitch); steadySince = time; return; }
@@ -1414,6 +1423,220 @@ internal static class LiveApp
         };
         breakTimer.Start();
 
+        // ---- glasses setup --------------------------------------------------------------------------
+        // Ctrl+Alt+C, the Calibrate button or calibration.start: the glasses show only the guide over the room, and the
+        // wearer is led through it there. Each step's result is saved and used the moment it is measured. Escape puts
+        // everything back as it was; afterwards Undo calibration does the same, until the app quits.
+        // On the glasses its keys work from any program while it runs, since the wearer cannot see which window has the
+        // keyboard; they are given back the moment it ends.
+        Keys[] setupKeys = [Keys.Space, Keys.Return, Keys.Back, Keys.S, Keys.Escape];
+        (SetupValues Values, Vector3 LiveBias)? undoTo = null, undoBeforeRun = null;
+        Vector3 liveBiasAtStart = Vector3.Zero;
+        SetupValues inUse = new(null, null, view.FovDeg, view.LevelDeg, view.RollDeg); // what setup has applied so far
+        bool changedThisRun = false;
+        IReadOnlyList<string> lastResults = [];
+        string setupMessage = "";
+        int logged = 0;
+        var setupTimer = new System.Windows.Forms.Timer(parts) { Interval = 50 };
+
+        SetupValues ValuesNow() =>
+            new(TrackingConfig.SavedAxes(), TrackingConfig.TryLoadGyroBias(out Vector3 saved) ? saved : null, view.FovDeg, view.LevelDeg, view.RollDeg);
+
+        // Saves and uses what differs: the mounting and gyro files, and view angle, level and lean in view.txt.
+        void UseValues(SetupValues from, SetupValues to, Vector3 liveBias)
+        {
+            try { TrackingConfig.Restore(to.Axes, to.GyroBias); }
+            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log.Line($"Could not save glasses setup: {e.Message}"); }
+            if (to.Axes != from.Axes) tracker.Axes = to.Axes ?? AxisMap.Default; // before the edge steps, which read the head in these axes
+            // No saved offset to go back to: the one the tracker had worked out live before setup.
+            if (to.GyroBias != from.GyroBias) tracker.SetGyroBias(to.GyroBias ?? liveBias);
+            if ((to.FovDeg, to.LevelDeg, to.LeanDeg) == (from.FovDeg, from.LevelDeg, from.LeanDeg)) return;
+            view = view with
+            {
+                FovDeg = Math.Clamp(to.FovDeg, ViewSettings.MinFovDeg, ViewSettings.MaxFovDeg),
+                LevelDeg = Math.Clamp(to.LevelDeg, -ViewSettings.MaxLevelDeg, ViewSettings.MaxLevelDeg),
+                RollDeg = Math.Clamp(to.LeanDeg, -ViewSettings.MaxRollDeg, ViewSettings.MaxRollDeg),
+            };
+            settings.SetView(view);
+            Touch();
+        }
+
+        void ShowSetup()
+        {
+            SetupRun? run = shared.Calibration;
+            SetupScreen? screen = null;
+            IReadOnlyList<string> results = lastResults;
+            if (run is not null) lock (run) { screen = run.Screen; results = [.. run.Results]; }
+            shared.Guide = screen;
+            settings.SetCalibration(screen, undoTo is not null, results, setupMessage);
+        }
+
+        string? Refuse(string why)
+        {
+            setupMessage = why;
+            ShowSetup();
+            return why;
+        }
+
+        string? StartSetup(SetupStepKind from)
+        {
+            if (shared.Calibration is not null) return Refuse("Glasses setup is already running.");
+            string? why = gameMode || vrMode ? "Leave plain screen or VR mode first: glasses setup draws its guide in the glasses."
+                : stereo ? "Switch 3D off first (Ctrl+Alt+D): the guide's lines must be drawn as one picture."
+                : link.State != XrShift.Tracking.LinkState.Connected || !tracker.HasPose ? "Glasses setup needs the glasses connected and sending head motion."
+                : null;
+            if (why is not null)
+            {
+                Notice(why, 5);
+                return Refuse(why);
+            }
+            if (carried is not null) SetDown();
+            inUse = ValuesNow();
+            liveBiasAtStart = tracker.GyroBias;
+            undoBeforeRun = undoTo;
+            changedThisRun = false;
+            logged = 0;
+            var run = new SetupRun(new SetupOptions(tracker.Axes, inUse.GyroBias, view.FovDeg,
+                DisplayOptics.OnePro.Width, DisplayOptics.OnePro.Height, from), inUse);
+            // Only on the glasses: in a window on the PC screen the wearer sees the screen, and the keys reach that window.
+            List<Keys> refused = fullScreen && keys ? setupKeys.Where(k => !window.AddPlainKey(k)).ToList() : [];
+            if (refused.Count > 0) Log.Line($"Glasses setup: another program holds {string.Join(", ", refused)}; use the settings window's buttons for those.");
+            shared.Calibration = run;
+            setupMessage = "";
+            setupTimer.Start();
+            Log.Line($"Glasses setup started from {SetupRun.Name(from)}.");
+            ShowSetup();
+            return null;
+        }
+
+        void EndSetup(bool cancel)
+        {
+            if (shared.Calibration is not { } run) return;
+            shared.Calibration = null;
+            foreach (Keys k in setupKeys) window.RemovePlainKey(k);
+            setupTimer.Stop();
+            lock (run) lastResults = [.. run.Results];
+            if (cancel && changedThisRun)
+            {
+                UseValues(inUse, run.Before, liveBiasAtStart);
+                undoTo = undoBeforeRun;
+                lastResults = [.. lastResults, "Cancelled: everything is back as it was before this setup."];
+            }
+            else if (cancel) lastResults = [.. lastResults, "Cancelled: nothing was changed."];
+            lock (gate) recenter = true; // a new mounting changes which way is straight ahead
+            Log.Line(cancel ? "Glasses setup cancelled." : "Glasses setup finished.");
+            ShowSetup();
+        }
+
+        string? UndoSetup()
+        {
+            if (shared.Calibration is not null) return Refuse("Finish or cancel glasses setup first.");
+            if (undoTo is not { } back) return Refuse("There is no glasses setup to undo.");
+            UseValues(ValuesNow(), back.Values, back.LiveBias);
+            undoTo = null;
+            lastResults = ["Undone: view angle, level, lean, sensor axes and gyro reading are back as they were before the last glasses setup."];
+            setupMessage = "";
+            lock (gate) recenter = true;
+            Log.Line("Glasses setup undone.");
+            ShowSetup();
+            return null;
+        }
+
+        string? SetupAction(string action)
+        {
+            if (action == "undo") return UndoSetup();
+            if (shared.Calibration is not { } run) return Refuse("Glasses setup is not running.");
+            bool finished;
+            lock (run) finished = run.Finished;
+            switch (action)
+            {
+                case "press" when finished:
+                    EndSetup(cancel: false);
+                    return null;
+                case "press":
+                    Quaternion head = tracker.GetPose().Orientation; // the raw pose the maths expects, not the display pose
+                    lock (run) run.Confirm(head);
+                    break;
+                case "retry": lock (run) run.Retry(); break;
+                case "skip": lock (run) run.Skip(); break;
+                case "cancel":
+                    // Once finished everything is saved: Escape only closes, and Undo is the way back.
+                    EndSetup(cancel: !finished);
+                    return null;
+                default: return Refuse($"Unknown glasses setup action '{action}'.");
+            }
+            ShowSetup();
+            return null;
+        }
+
+        setupTimer.Tick += (_, _) =>
+        {
+            if (shared.Calibration is not { } run) return;
+            SetupValues? changed;
+            List<string> fresh;
+            lock (run)
+            {
+                changed = run.TakeChanges();
+                fresh = run.Results.Skip(logged).ToList();
+            }
+            logged += fresh.Count;
+            foreach (string line in fresh) Log.Line("Glasses setup: " + line);
+            if (changed is not null)
+            {
+                if (!changedThisRun) undoTo = (run.Before, liveBiasAtStart);
+                changedThisRun = true;
+                UseValues(inUse, changed, liveBiasAtStart);
+                inUse = changed;
+            }
+            ShowSetup();
+        };
+
+        System.Text.Json.Nodes.JsonObject SetupState()
+        {
+            HeadPose pose = tracker.GetPose();
+            var state = new System.Text.Json.Nodes.JsonObject
+            {
+                ["active"] = shared.Calibration is not null,
+                ["canUndo"] = undoTo is not null,
+                ["message"] = setupMessage,
+                ["pose"] = new System.Text.Json.Nodes.JsonObject { ["yawDeg"] = pose.YawDeg, ["pitchDeg"] = pose.PitchDeg, ["rollDeg"] = pose.RollDeg },
+                ["view"] = new System.Text.Json.Nodes.JsonObject { ["fovDeg"] = view.FovDeg, ["levelDeg"] = view.LevelDeg, ["leanDeg"] = view.RollDeg },
+            };
+            IReadOnlyList<string> results = lastResults;
+            if (shared.Calibration is { } run)
+            {
+                lock (run)
+                {
+                    SetupScreen s = run.Screen;
+                    state["step"] = run.CheckingMode ? "mode" : run.Finished ? "done" : run.Setup.Step.ToString();
+                    state["waiting"] = run.CheckingMode ? "Press" : run.Setup.Waiting.ToString();
+                    state["progress"] = s.Progress;
+                    state["instruction"] = s.Instruction;
+                    state["note"] = s.Note;
+                    if (!run.CheckingMode && run.Setup.Target is { } t)
+                        state["target"] = new System.Text.Json.Nodes.JsonObject { ["posture"] = t.Posture.ToString(), ["xPx"] = t.XPx, ["drawnTiltDeg"] = t.DrawnTiltDeg };
+                    results = [.. run.Results];
+                }
+            }
+            state["results"] = new System.Text.Json.Nodes.JsonArray([.. results.Select(r => (System.Text.Json.Nodes.JsonNode?)r)]);
+            return state;
+        }
+
+        calibrate = (action, from) =>
+        {
+            string? refused = action switch
+            {
+                "start" => StartSetup(SetupRun.ParseStep(from) ?? SetupStepKind.Rest),
+                "status" => null,
+                _ => SetupAction(action),
+            };
+            return refused is null ? (SetupState(), null) : (null, refused);
+        };
+        settings.CalibrationStartRequested += from => StartSetup(from);
+        settings.CalibrationAction += action => SetupAction(action);
+        static string ActionOf(Keys key) => key switch { Keys.Space or Keys.Return => "press", Keys.Back => "retry", Keys.S => "skip", _ => "cancel" };
+        window.PlainKey += key => SetupAction(ActionOf(key));
+
         menuPick = choice =>
         {
             string name = choice >= 0 && choice < MenuChoices.Length ? MenuChoices[choice] : "";
@@ -1502,6 +1725,10 @@ internal static class LiveApp
         {
             switch (key)
             {
+                case Keys.C:
+                    StartSetup(SetupStepKind.Rest);
+                    settings.ShowCalibration();
+                    return;
                 case Keys.D0 or Keys.Home or Keys.Space:
                     if (stationary)
                     {
@@ -1599,7 +1826,11 @@ internal static class LiveApp
 
         window.KeyDown += (_, e) =>
         {
-            if (e.KeyCode is Keys.Escape or Keys.Q) window.Close();
+            // During setup its keys are setup's, also when another program kept one of them from being taken globally.
+            if (!keys) return;
+            if (shared.Calibration is not null && setupKeys.Contains(e.KeyCode))
+                SetupAction(ActionOf(e.KeyCode));
+            else if (e.KeyCode is Keys.Escape or Keys.Q) window.Close();
             else Act(e.KeyCode);
         };
         window.HotKey += key =>
@@ -1943,8 +2174,11 @@ internal static class LiveApp
             scene.Apply(now.Layout, now.Sources, now.Windows, optics);
             scene.Apply(now.Deck);
             scene.Update();
-            scene.RulerVisible = now.View.Ruler;
-            scene.OverlayVisible = overlayNow;
+            // Glasses setup: only its guide over the room, so real door frames and edges can be seen.
+            SetupScreen? guide = shared.Guide;
+            bool guiding = guide is not null;
+            scene.RulerVisible = now.View.Ruler && !guiding;
+            scene.OverlayVisible = overlayNow && !guiding;
 
             // Look ahead by the whole trip, this app's measured share plus the glasses' own delay; the tracker
             // smooths and caps it and reports what it used.
@@ -1972,8 +2206,8 @@ internal static class LiveApp
                     : $"yaw {pose.YawDeg,6:F1}  pitch {pose.PitchDeg,6:F1}  roll {pose.RollDeg,6:F1}";
                 // Notices have their own area; while one shows, the status strip stays empty unless pinned.
                 // Callers should pass a notice's level themselves; until they do it is guessed from its words.
-                scene.Stereo = now.Stereo;
-                scene.SetNotice(noticeNow, SpaceScene.GuessNoticeLevel(noticeNow));
+                scene.Stereo = now.Stereo && !guiding;
+                scene.SetNotice(guiding ? "" : noticeNow, SpaceScene.GuessNoticeLevel(noticeNow));
                 if (noticeNow.Length > 0 && !now.StatusPinned) scene.SetStatus("");
                 else scene.SetStatus(string.Create(CultureInfo.InvariantCulture,
                     $"{fps:F0} fps   {tracking}   predict {predictMs:F1} ms   view {now.View.FovDeg:F1}°   level {now.View.LevelDeg:F2}°   {workspaceName}{(now.View.LookPointer ? (now.View.LookFollow ? "   pointer follows" : "   look-to-move") : "")}{(now.View.Follow ? "   screens follow" : "")}{(MathF.Abs(now.View.Zoom - 1f) > 0.01f ? $"   zoom {now.View.Zoom * 100:F0}%" : "")}{(now.Blank ? "   screens hidden" : "")}") +
@@ -2011,13 +2245,14 @@ internal static class LiveApp
             {
                 heldHead = null;
             }
-            scene.SetHands(shared.HandsShown, shared.HandsFrame, shared.HandsPinching, shared.HandsStatus);
-            scene.SetMenu(shared.HandsShown ? shared.MenuItems : null, shared.MenuHighlight);
+            scene.SetHands(shared.HandsShown && !guiding, shared.HandsFrame, shared.HandsPinching, shared.HandsStatus);
+            scene.SetMenu(shared.HandsShown && !guiding ? shared.MenuItems : null, shared.MenuHighlight);
 
-            scene.Look(head, now.View.Dim, now.Blank, dt, now.View.EasyReading);
+            scene.Look(head, now.View.Dim, now.Blank || guiding, dt, now.View.EasyReading);
             scene.SetMarks(shared.Marks);
             scene.PointToHiddenScreens(head, optics, now.View.EdgeArrows);
-            renderer.Draw(head, optics, now.Stereo ? Camera.DefaultEyeSeparation : 0);
+            scene.SetGuide(guide, head, optics);
+            renderer.Draw(head, optics, now.Stereo && !guiding ? Camera.DefaultEyeSeparation : 0);
 
             if (previewNow0() - ratesAt >= 2)
             {

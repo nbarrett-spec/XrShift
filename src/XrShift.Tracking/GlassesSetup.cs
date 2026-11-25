@@ -140,6 +140,9 @@ public sealed class GlassesSetup
         _ => CurrentStatus is SetupStepStatus.Done ? 1f : 0f,
     };
 
+    /// <summary>During an edge step: presses taken so far and asked for in all, for "3 of 6".</summary>
+    public (int Taken, int Asked)? PressCount => Waiting == SetupWait.Press ? (_edges!.Presses.Count, _edges.Asked) : null;
+
     SetupStepStatus CurrentStatus => Finished ? SetupStepStatus.Done : _status[_index];
 
     public void Add(ImuSample s)

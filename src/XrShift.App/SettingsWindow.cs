@@ -705,6 +705,7 @@ internal sealed partial class SettingsWindow : Form
             "Every screen one zoom step bigger, keeping the arrangement (Zoom on the Screens page). Ctrl+Alt+PgUp / PgDn from anywhere.");
         _bigger.Click += (_, _) => ChangeView(s => s with { Zoom = Sizes.ZoomSteps.FirstOrDefault(z => z > s.Zoom + 0.01f, Sizes.ZoomSteps[^1]) });
         _settingsPage.Controls.Add(eyes);
+        BuildSetupPanel([app, eyes]);
     }
 
     static void PageTitle(Control page, string title, string sub)
@@ -841,6 +842,7 @@ internal sealed partial class SettingsWindow : Form
             case "pcs" or "other" or "network": ShowSection(PcsIndex); break;
             case "advanced": ShowSection(SettingsIndex); ShowAdvanced(true); break;
             case "tune" or "settings": ShowSection(SettingsIndex); break;
+            case "setup" or "calibrate": ShowCalibration(); break;
             default: ShowSection(1); ShowInspector(_pageScreen); break;
         }
     }

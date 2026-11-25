@@ -166,6 +166,52 @@ internal sealed class SpaceScene : IDisposable
             _notice = renderer.Add(Overlay(0, 0, 1, 1), notice, headLocked: true);
         _notice.Visible = false;
         PlaceOverlays();
+
+        // Glasses setup: a picture over the whole view, as the arrows have, so display pixels map straight onto it.
+        using (Bitmap guide = Pictures.Guide([], [], "", "", null, []))
+            _guide = renderer.Add(EdgesMesh(DisplayOptics.OnePro), guide, headLocked: true);
+        _guide.Visible = false;
+    }
+
+    readonly SceneItem _guide;
+    DisplayOptics _guideOptics = DisplayOptics.OnePro;
+    string _guideShown = "";
+
+    /// <summary>
+    /// Shows glasses setup's guide, or hides it (null). Lines fixed to the picture are drawn at their display pixels;
+    /// lines fixed in the room are placed for <paramref name="view"/>, the way the room is drawn now. Drawing thread only.
+    /// </summary>
+    public void SetGuide(XrShift.Tracking.SetupScreen? screen, System.Numerics.Quaternion view, DisplayOptics optics)
+    {
+        _guide.Visible = screen is not null;
+        if (screen is null) return;
+        if (optics != _guideOptics)
+        {
+            // The picture must span exactly the view drawn, whatever the view angle, to stay one pixel for one.
+            _guideOptics = optics;
+            _renderer.SetMesh(_guide, EdgesMesh(optics), 0);
+        }
+        // shortcut: a line fixed in the room is redrawn as the head moves, and a long one is drawn straight between its
+        // ends; no step draws one yet. Give such lines a mesh of their own in the room if a step comes to need them.
+        PointF? At(XrShift.Tracking.GuideSpace space, System.Numerics.Vector2 p) =>
+            (space == XrShift.Tracking.GuideSpace.Display
+                ? XrShift.Tracking.GuideDrawing.ToPicture(p, Pictures.GuideWidth, Pictures.GuideHeight)
+                : XrShift.Tracking.GuideDrawing.ToPicture(p, view, optics.HorizontalFovDeg, Pictures.GuideWidth, Pictures.GuideHeight)) is { } q
+                ? new PointF(q.X, q.Y) : null;
+        var lines = new List<(PointF, PointF)>();
+        foreach (XrShift.Tracking.GuideLine line in screen.Drawing.Lines)
+            if (At(line.Space, line.From) is { } a && At(line.Space, line.To) is { } b) lines.Add((a, b));
+        var marks = new List<PointF>();
+        foreach (XrShift.Tracking.GuideMark mark in screen.Drawing.Marks)
+            if (At(mark.Space, mark.At) is { } m) marks.Add(m);
+
+        string key = string.Join(";", lines.Select(l => $"{l.Item1.X:F1},{l.Item1.Y:F1},{l.Item2.X:F1},{l.Item2.Y:F1}")) + "|" +
+                     string.Join(";", marks.Select(m => $"{m.X:F1},{m.Y:F1}")) + "|" +
+                     string.Join("|", [screen.Progress, screen.Instruction, screen.Note ?? "", .. screen.Results]);
+        if (key == _guideShown) return;
+        _guideShown = key;
+        using Bitmap picture = Pictures.Guide(lines, marks, screen.Progress, screen.Instruction, screen.Note, screen.Results);
+        _renderer.SetPicture(_guide, picture);
     }
 
     /// <summary>From the middle of the view to its side edge, in display pixels, measured the way the projection does: by tangent.</summary>
