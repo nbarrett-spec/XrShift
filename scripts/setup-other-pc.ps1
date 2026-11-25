@@ -3,7 +3,8 @@
 # It copies the app to your own programs folder, copies network.json (the shared secret) to the app's settings
 # folder, and adds the bot hooks to Claude Code's settings, keeping a backup. No administrator rights needed.
 # To undo: delete the two folders it names at the end and put the settings backup back.
-param([switch]$Force)   # -Force: install even if the kit is older than what is already on this PC
+param([switch]$Force,      # -Force: install even if the kit is older than what is already on this PC
+      [switch]$RegisterVr) # -RegisterVr: also tell SteamVR about the VR driver in the kit (off unless asked for)
 $ErrorActionPreference = 'Stop'
 $kit = $PSScriptRoot
 $appSource = Join-Path $kit 'XrShift'
@@ -53,6 +54,16 @@ foreach ($event in 'SessionStart', 'UserPromptSubmit', 'Notification', 'PostTool
 $json = $settings | ConvertTo-Json -Depth 30
 $null = $json | ConvertFrom-Json   # must still be valid before it replaces the real file
 [IO.File]::WriteAllText($settingsFile, $json, (New-Object Text.UTF8Encoding $false))
+
+# The VR driver ships inside the app; registering it edits SteamVR's own settings, so it only happens with -RegisterVr.
+$register = Join-Path $kit 'register-vr-driver.ps1'
+if ((Test-Path (Join-Path $appFolder 'steamvr\xrshift\bin\win64\driver_xrshift.dll')) -and (Test-Path $register)) {
+    if ($RegisterVr) { & $register -Register -DriverFolder (Join-Path $appFolder 'steamvr\xrshift') }
+    else {
+        & $register -Status -DriverFolder (Join-Path $appFolder 'steamvr\xrshift')
+        Write-Host "To let SteamVR use the VR driver, run again with -RegisterVr (or: powershell -ExecutionPolicy Bypass -File register-vr-driver.ps1 -Register). -Unregister undoes it."
+    }
+}
 
 Write-Host "Done on $env:COMPUTERNAME."
 Write-Host "  App:       $appFolder"

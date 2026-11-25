@@ -34,12 +34,23 @@ jobs:
       - name: Test
         run: dotnet test XrShift.slnx -c Release --no-build
 
+      # Before the publish: the app project copies src/XrShift.SteamVR/xrshift/** into steamvr/xrshift/ of the app.
+      - name: Build the SteamVR driver
+        shell: pwsh
+        run: |
+          ./src/XrShift.SteamVR/build.ps1 -Verify
+          if ($LASTEXITCODE -ne 0) { throw 'driver build failed' }
+
       - name: Publish and zip the kit
         shell: pwsh
         run: |
           dotnet publish src/XrShift.App -c Release -r win-x64 --self-contained true -p:Version=${{ env.VERSION }} -o kit/XrShift --nologo
           if ($LASTEXITCODE -ne 0) { throw 'publish failed' }
-          Copy-Item scripts/setup-other-pc.ps1 kit/
+          Copy-Item scripts/setup-other-pc.ps1, scripts/register-vr-driver.ps1 kit/
+          # The driver must sit where VrBridge.cs looks: <app>\steamvr\xrshift\bin\win64\driver_xrshift.dll.
+          foreach ($f in 'bin\win64\driver_xrshift.dll', 'driver.vrdrivermanifest') {
+            if (-not (Test-Path "kit/XrShift/steamvr/xrshift/$f")) { throw "driver file missing from the kit: steamvr\xrshift\$f" }
+          }
           # The kit must never carry settings or the shared secret.
           if (Get-ChildItem kit -Recurse -Filter network.json) { throw 'network.json found in the kit' }
           Compress-Archive -Path kit/* -DestinationPath "XrShift-kit-${{ env.VERSION }}.zip"
