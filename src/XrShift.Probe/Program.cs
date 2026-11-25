@@ -35,6 +35,7 @@ internal static class Program
             case "steady" when path is not null: return Steady(path);
             case "synth" when path is not null: return Synth(path);
             case "serve" when path is not null: return Serve(path, s_port);
+            case "wearer": return Wearer(args);
             default: return Usage();
         }
     }
@@ -53,6 +54,9 @@ internal static class Program
                                                With a recording, replays it and saves nothing.
             xrprobe synth <file>               write a fake recording (no glasses needed)
             xrprobe serve <file> [--port N]    act as the glasses on this PC, playing a recording
+            xrprobe wearer [--port N]          act as glasses worn by a pretend person who goes through the app's glasses
+              [--fov D --level D --lean D]     setup (over its trial Control API), with display angles known; prints what
+                                               setup found against them. For trial sessions: --host 127.0.0.1 --port N --api
             Any command that reads the glasses takes --host H --port N (e.g. 127.0.0.1 for 'serve').
             """);
         return 1;
@@ -339,6 +343,209 @@ internal static class Program
         catch (IOException) { Console.WriteLine("Reader went away."); }
         finally { listener.Stop(); }
         return 0;
+    }
+
+    // ---- wearer -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Stands in for the glasses and the person wearing them, for trying glasses setup without either: streams motion
+    /// live, like 'serve', and watches setup through a trial session's Control API, doing what it asks. Set on the
+    /// desk, then picked up, nodding, and for each line the head held so a true upright edge lies on it, for display
+    /// angles chosen here. The sensor sits a few degrees off the usual mounting, so the axis step has something to find.
+    /// </summary>
+    static int Wearer(string[] args)
+    {
+        float Arg(string name, float fallback) =>
+            float.TryParse(Option(args, name), NumberStyles.Float, CultureInfo.InvariantCulture, out float v) ? v : fallback;
+        float fov = Arg("--fov", 48.3f), level = Arg("--level", 1.2f), lean = Arg("--lean", -0.6f);
+        string pipe = Option(args, "--pipe") ?? "ArWorkspace.Api.Trial";
+
+        Assert(AxisMap.TryFromRightUp(new Vector3(0.998f, 0.04f, -0.03f), new Vector3(0.02f, -0.78f, 0.62f), out AxisMap mount));
+        var sim = new ImuSimulator(mount) { GyroBias = new Vector3(0.004f, -0.006f, 0.003f), GyroNoise = 0.002f };
+        var moves = new System.Collections.Concurrent.ConcurrentQueue<(Vector3 Rate, int Ms)>();
+        int moving = 0; // moves taken but not yet played out
+        using CancellationTokenSource cts = MakeCts(0);
+
+        var listener = new TcpListener(IPAddress.Loopback, s_port);
+        listener.Start();
+        Console.WriteLine($"Pretend glasses on 127.0.0.1:{s_port}: display {fov:F1} degrees wide, level {level:F2}, lean {lean:F2}. Waiting for the app.");
+        var streaming = new Thread(() =>
+        {
+            try
+            {
+                using TcpClient client = listener.AcceptTcpClient();
+                NetworkStream stream = client.GetStream();
+                byte[] frame = new byte[ImuFrame.WireLength];
+                var clock = Stopwatch.StartNew();
+                long sent = 0;
+                (Vector3 Rate, int Ms) now = (Vector3.Zero, 0);
+                while (!cts.IsCancellationRequested)
+                {
+                    for (long due = clock.ElapsedMilliseconds; sent < due; sent++)
+                    {
+                        if (now.Ms == 0 && moves.TryDequeue(out var next)) now = next;
+                        Vector3 r = now.Ms > 0 ? now.Rate : Vector3.Zero;
+                        ImuFrame.Write(frame, sim.Step(r.X, r.Y, r.Z));
+                        stream.Write(frame);
+                        if (now.Ms > 0 && --now.Ms == 0) Interlocked.Decrement(ref moving);
+                    }
+                    Thread.Sleep(2);
+                }
+            }
+            catch (Exception e) when (e is IOException or SocketException) { Console.WriteLine("The app stopped reading."); cts.Cancel(); }
+        }) { IsBackground = true };
+        streaming.Start();
+
+        // The head as the wearer holds it, degrees: turned left, looking up, tilted right.
+        (float Yaw, float Pitch, float Roll) head = (0, 0, 0);
+        void Turn(int axis, float degrees, int ms)
+        {
+            if (MathF.Abs(degrees) < 1e-4f) return;
+            float speed = degrees / RadToDeg / (ms / 1000f);
+            Vector3 rate = axis switch { 0 => new(speed, 0, 0), 1 => new(0, speed, 0), _ => new(0, 0, speed) }; // turn left, look up, tilt right
+            Interlocked.Increment(ref moving);
+            moves.Enqueue((rate, ms));
+        }
+        // Undo roll and pitch, turn, then pitch and roll again: each a turn about one of the head's own axes, so the
+        // head ends exactly at yaw, then pitch, then roll, as EdgeFitter reads a head.
+        void MoveTo(float yaw, float pitch, float roll, int ms = 250)
+        {
+            Turn(2, -head.Roll, ms);
+            Turn(1, -head.Pitch, ms);
+            Turn(0, yaw - head.Yaw, ms);
+            Turn(1, pitch, ms);
+            Turn(2, roll, ms);
+            head = (yaw, pitch, roll);
+        }
+
+        var random = new Random(11);
+        float Seen(EdgeTarget t, float yaw, float pitch, float roll) => EdgeFitter.VerticalTiltDeg(
+            Quaternion.CreateFromYawPitchRoll(yaw / RadToDeg, pitch / RadToDeg, -roll / RadToDeg), t.XPx, fov, level, lean, 1920);
+        (float, float, float) PoseFor(EdgeTarget t)
+        {
+            float pitch = t.Posture switch { HeadPosture.Up => 33, HeadPosture.Down => -33, _ => 0 } + (random.NextSingle() - 0.5f) * 6;
+            float yaw = (random.NextSingle() - 0.5f) * 60, roll = 0;
+            for (int i = 0; i < 30; i++) // tilt the head until the edge lies along the drawn line
+            {
+                float slope = (Seen(t, yaw, pitch, roll + 0.01f) - Seen(t, yaw, pitch, roll - 0.01f)) / 0.02f;
+                roll -= (Seen(t, yaw, pitch, roll) - t.DrawnTiltDeg) / slope;
+            }
+            return (yaw, pitch, roll);
+        }
+
+        using var api = new System.IO.Pipes.NamedPipeClientStream(".", pipe, System.IO.Pipes.PipeDirection.InOut);
+        StreamWriter? send = null;
+        StreamReader? read = null;
+        int id = 0;
+        System.Text.Json.Nodes.JsonNode Call(string method, string? from = null)
+        {
+            string request = $$"""{"jsonrpc":"2.0","id":{{++id}},"method":"{{method}}"{{(from is null ? "" : $$""","params":{"from":"{{from}}"}""")}}}""";
+            send!.WriteLine(request);
+            System.Text.Json.Nodes.JsonNode reply = System.Text.Json.Nodes.JsonNode.Parse(read!.ReadLine() ?? throw new IOException("the app closed the line"))!;
+            return reply["result"] ?? throw new InvalidOperationException($"{method}: {reply["error"]?["message"]}");
+        }
+
+        var wall = Stopwatch.StartNew();
+        string said = "", pressedFor = "", movedFor = "";
+        double settledAt = 0;
+        bool started = false, pickedUp = false, nodded = false;
+        int exit = 2;
+        try
+        {
+            while (!cts.IsCancellationRequested && wall.Elapsed.TotalMinutes < 6)
+            {
+                cts.Token.WaitHandle.WaitOne(100);
+                if (send is null)
+                {
+                    try { api.Connect(200); } catch (TimeoutException) { continue; }
+                    send = new StreamWriter(api) { AutoFlush = true };
+                    read = new StreamReader(api);
+                }
+                System.Text.Json.Nodes.JsonNode s = Call("calibration.status");
+                bool active = s["active"]!.GetValue<bool>();
+                if (!active && !started)
+                {
+                    if (s["pose"]?["pitchDeg"] is null) continue;
+                    Call("calibration.start", Option(args, "--from"));
+                    started = true;
+                    continue;
+                }
+                if (!active)
+                {
+                    Console.WriteLine("Setup closed. What it said:");
+                    foreach (var line in s["results"]!.AsArray()) Console.WriteLine("  " + line);
+                    System.Text.Json.Nodes.JsonNode v = s["view"]!;
+                    float gotFov = v["fovDeg"]!.GetValue<float>(), gotLevel = v["levelDeg"]!.GetValue<float>(), gotLean = v["leanDeg"]!.GetValue<float>();
+                    Console.WriteLine($"Saved view angle {gotFov:F2} (true {fov:F2}, off {gotFov - fov:F2}), level {gotLevel:F2} (true {level:F2}, off {gotLevel - level:F2}), lean {gotLean:F2} (true {lean:F2}, off {gotLean - lean:F2}).");
+                    exit = 0;
+                    break;
+                }
+
+                string step = s["step"]!.GetValue<string>(), waiting = s["waiting"]!.GetValue<string>();
+                string progress = s["progress"]!.GetValue<string>(), note = s["note"]?.GetValue<string>() ?? "";
+                string now = $"{progress}: {s["instruction"]}{(note.Length > 0 ? "  [" + note + "]" : "")}";
+                if (now != said) Console.WriteLine($"{wall.Elapsed.TotalSeconds,6:F1} s  {now}");
+                said = now;
+                double t = wall.Elapsed.TotalSeconds;
+                bool still = Volatile.Read(ref moving) == 0;
+
+                if (step == "mode") { Call("calibration.press"); continue; } // the box stayed in front: Follow
+                if (step == "done") { Call("calibration.press"); continue; }
+                switch (waiting)
+                {
+                    case "DeskStill":
+                        break; // lying on the desk: nothing moves
+                    case "Hold" when progress.EndsWith("1 of 2") && !pickedUp:
+                        MoveTo(0, 20, 0, 400); // picked up and put on
+                        MoveTo(15, -6, 4, 400);
+                        MoveTo(0, 0, 0, 400);
+                        pickedUp = true;
+                        break;
+                    case "Hold" when progress.EndsWith("2 of 2") && !nodded:
+                        MoveTo(0, 30, 0, 600); // the nod, chin up, and hold
+                        nodded = true;
+                        break;
+                    case "Neutral" or "Hold" when head != (0, 0, 0) && still && !progress.EndsWith("2 of 2"):
+                        MoveTo(0, 0, 0, 400); // straight ahead and level
+                        break;
+                    case "Press" when s["target"] is { } target:
+                    {
+                        var t0 = new EdgeTarget(Enum.Parse<HeadPosture>(target["posture"]!.GetValue<string>()), target["xPx"]!.GetValue<float>(), target["drawnTiltDeg"]!.GetValue<float>());
+                        if (movedFor != progress || (pressedFor == progress && note.Length > 0))
+                        {
+                            (float y, float p, float r) = PoseFor(t0);
+                            MoveTo(y, p, r);
+                            movedFor = progress;
+                            pressedFor = "";
+                            settledAt = double.MaxValue;
+                        }
+                        else if (still && settledAt == double.MaxValue) settledAt = t;
+                        else if (still && pressedFor != progress && t - settledAt > 2.5)
+                        {
+                            Call("calibration.press"); // the line lies on the edge: press
+                            pressedFor = progress;
+                        }
+                        break;
+                    }
+                    case "Nothing":
+                        Console.WriteLine("Setup refused a step; stopping here.");
+                        Call("calibration.cancel");
+                        return 2;
+                }
+            }
+        }
+        catch (Exception e) when (e is IOException or InvalidOperationException) { Console.WriteLine($"Lost the app: {e.Message}"); }
+        finally
+        {
+            cts.Cancel();
+            listener.Stop();
+        }
+        return exit;
+    }
+
+    static void Assert(bool ok)
+    {
+        if (!ok) throw new InvalidOperationException("A fixed value did not hold.");
     }
 
     // ---- axes ---------------------------------------------------------------------------

@@ -17,9 +17,13 @@ internal sealed class ViewWindow : Form
     /// <summary>A Ctrl+Alt hotkey added with <see cref="AddHotKey"/> was pressed, in any program.</summary>
     public event Action<Keys>? HotKey;
 
-    public ViewWindow(Rectangle area, bool fullScreen)
+    readonly bool _takeFocus;
+
+    /// <param name="takeFocus">False for a trial window driven by a script: it must never take the keyboard from the person at the PC.</param>
+    public ViewWindow(Rectangle area, bool fullScreen, bool takeFocus = true)
     {
         _fullScreen = fullScreen;
+        _takeFocus = takeFocus;
         Text = "XrShift";
         AutoScaleMode = AutoScaleMode.None;
         StartPosition = FormStartPosition.Manual;
@@ -46,7 +50,7 @@ internal sealed class ViewWindow : Form
     // When it did (the settings window was hidden and it was next in line), the whole PC turned sluggish
     // until another window was brought forward; most likely Windows treats a full-screen 3D program in
     // front as a game and puts everything else second.
-    protected override bool ShowWithoutActivation => _fullScreen;
+    protected override bool ShowWithoutActivation => _fullScreen || !_takeFocus;
 
     protected override CreateParams CreateParams
     {
@@ -67,6 +71,30 @@ internal sealed class ViewWindow : Form
         return true;
     }
 
+    /// <summary>Ids of keys taken on their own (no Ctrl+Alt) start here, apart from the Ctrl+Alt ones, which use the key code.</summary>
+    const int PlainKeyId = 0x10000;
+
+    /// <summary>A key added with <see cref="AddPlainKey"/> was pressed, in any program.</summary>
+    public event Action<Keys>? PlainKey;
+
+    /// <summary>
+    /// Takes <paramref name="key"/> on its own, with no Ctrl+Alt, from every program until <see cref="RemovePlainKey"/>:
+    /// only for a moment when the wearer cannot see the PC screen. False if another program already has it.
+    /// </summary>
+    public bool AddPlainKey(Keys key)
+    {
+        int id = PlainKeyId + (int)key;
+        if (!RegisterHotKey(Handle, id, ModNoRepeat, (uint)key)) return false;
+        _hotKeys.Add(id);
+        return true;
+    }
+
+    public void RemovePlainKey(Keys key)
+    {
+        int id = PlainKeyId + (int)key;
+        if (_hotKeys.Remove(id)) UnregisterHotKey(Handle, id);
+    }
+
     /// <summary>Keeps the mouse pointer inside a desktop area, or frees it with null. Windows forgets this now and then, so call it regularly.</summary>
     public static void ConfineCursor(Rectangle? area)
     {
@@ -83,7 +111,8 @@ internal sealed class ViewWindow : Form
 
     protected override void WndProc(ref Message m)
     {
-        if (m.Msg == WmHotKey) HotKey?.Invoke((Keys)(int)m.WParam);
+        if (m.Msg == WmHotKey && (int)m.WParam >= PlainKeyId) PlainKey?.Invoke((Keys)((int)m.WParam - PlainKeyId));
+        else if (m.Msg == WmHotKey) HotKey?.Invoke((Keys)(int)m.WParam);
         base.WndProc(ref m);
     }
 

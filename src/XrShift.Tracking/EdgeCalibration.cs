@@ -289,6 +289,8 @@ public sealed class EdgeCalibration
     public CalibrationState State { get; private set; }
     public EdgeTarget? Current => State == CalibrationState.WaitingForPress ? _queue[_next] : null;
     public IReadOnlyList<EdgePress> Presses => _presses;
+    /// <summary>How many presses are asked for in all, retakes included; <see cref="Presses"/> says how many are taken.</summary>
+    public int Asked => _queue.Count;
     public EdgeFit? Result { get; private set; }
     /// <summary>Why it failed, in plain words for the wearer.</summary>
     public string? Failure { get; private set; }

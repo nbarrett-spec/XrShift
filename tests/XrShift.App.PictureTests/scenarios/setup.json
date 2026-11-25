@@ -1,0 +1,69 @@
+{
+  // Glasses setup as the wearer sees it: only the guide over the room (the three screens behind it must not show).
+  // Lines are in display pixels from the middle of the 1920x1080 view, x right and y up, exactly as the maths gives
+  // them: a vertical line at x = -816 is drawn on columns 143 and 144 of the picture, 816 left of the middle (960).
+  // The view-angle line is the first look-up press on the right: drawn leaning -15.7 degrees, the lean a true
+  // vertical has there when looking up 35 degrees with a 50.7 degree view (EdgeCalibration.ViewAngle).
+  "frames": [
+    {
+      "name": "mode-check", "layout": "three-screens.layout.json",
+      "guide": {
+        "progress": "Before you start: the glasses' mode",
+        "instruction": "Turn your head. If this box stays in front of your eyes, press Confirm. If it stays behind in the room, click the X button on the glasses once and try again.",
+        "lines": [
+          { "from": [-320, 180], "to": [320, 180] }, { "from": [320, 180], "to": [320, -180] },
+          { "from": [320, -180], "to": [-320, -180] }, { "from": [-320, -180], "to": [-320, 180] }
+        ]
+      }
+    },
+    {
+      "name": "axes-nod-up", "layout": "three-screens.layout.json",
+      "guide": {
+        "progress": "Sensor axes: 2 of 2",
+        "instruction": "Nod UP about 30 degrees (chin up, no turning or tilting) and hold until the beep",
+        "marks": [ [0, 0] ],
+        "results": [ "Resting gyro reading 0.23 -0.34 0.17 degrees a second, none saved before." ]
+      }
+    },
+    {
+      "name": "level-lean-left", "layout": "three-screens.layout.json",
+      "guide": {
+        "progress": "Level and lean: 3 of 6",
+        "instruction": "Keep your head level. Find an upright edge: a door frame, window side or wall corner. Turn until it lies under the left line, tilt your head until the line covers it exactly, hold still and press.",
+        "lines": [ { "from": [-816, -486], "to": [-816, 486] } ],
+        "results": [ "Sensor axes measured from a nod of 31 degrees; the gyro agrees within 0.6." ]
+      }
+    },
+    {
+      "name": "view-angle-right-up", "layout": "three-screens.layout.json", "pitch": 35,
+      "guide": {
+        "progress": "View angle: 1 of 12",
+        "instruction": "Look UP about 35 degrees at a tall upright edge such as a door frame or wall corner. Lay the right line exactly on it, tilting your head until they match, hold still and press.",
+        "lines": [ { "from": [947.51, -467.87], "to": [684.49, 467.87] } ],
+        "results": [ "Level 1.2 degrees, was 0.0. Lean -0.6, was 0.0. The 6 presses agree within 0.2 degrees." ]
+      }
+    },
+    {
+      "name": "press-refused", "layout": "three-screens.layout.json",
+      "guide": {
+        "progress": "Level and lean: 2 of 6",
+        "instruction": "Keep your head level. Find an upright edge: a door frame, window side or wall corner. Turn until it lies under the right line, tilt your head until the line covers it exactly, hold still and press.",
+        "note": "That was looking up. Keep your head level and press again.",
+        "lines": [ { "from": [816, -486], "to": [816, 486] } ]
+      }
+    },
+    {
+      "name": "results", "layout": "three-screens.layout.json",
+      "guide": {
+        "progress": "Glasses setup: done",
+        "instruction": "Setup is finished. Press Confirm to go back to your screens.",
+        "results": [
+          "Resting gyro reading 0.23 -0.34 0.17 degrees a second, none saved before.",
+          "Sensor axes measured from a nod of 31 degrees; the gyro agrees within 0.6.",
+          "Level 1.2 degrees, was 0.0. Lean -0.6, was 0.0. The 6 presses agree within 0.2 degrees.",
+          "View angle 48.3 degrees, was 50.7 (give or take 0.3). Level 1.2, was 1.2. Lean -0.6, was -0.6. The 18 presses agree within 0.2 degrees."
+        ]
+      }
+    }
+  ]
+}

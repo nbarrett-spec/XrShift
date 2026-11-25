@@ -24,6 +24,17 @@ public interface IControlHost
     (int Width, int Height) PictureSize(ScreenSpec screen) => screen.PixelWidth > 0 ? (screen.PixelWidth, screen.PixelHeight) : (1920, 1080);
     /// <summary>The glasses the presets size screens for.</summary>
     DisplayOptics Optics => DisplayOptics.OnePro;
+
+    /// <summary>
+    /// Glasses setup. <paramref name="action"/> is start, press, retry, skip, cancel, undo or status; <paramref name="from"/>
+    /// is where start begins (rest, axes, level or view; null for the beginning). Returns the setup's state after the
+    /// action, or null with the reason it could not be done.
+    /// </summary>
+    JsonObject? Calibrate(string action, string? from, out string? refused)
+    {
+        refused = "Glasses setup needs the running app with the glasses connected.";
+        return null;
+    }
 }
 
 /// <summary>
@@ -179,6 +190,17 @@ public static class ControlApi
                     if (method == "object.remove") host.Use(host.Deck.Remove(target));
                     else host.Focus(target);
                     result = new JsonObject { ["id"] = target };
+                    break;
+                }
+                case "calibration.start" or "calibration.press" or "calibration.retry" or "calibration.skip"
+                    or "calibration.cancel" or "calibration.undo" or "calibration.status":
+                {
+                    string? from = Text(p, "from");
+                    if (from is not null && from.ToLowerInvariant() is not ("rest" or "axes" or "level" or "view"))
+                        return Error(id, InvalidParams, "from must be one of: rest, axes, level, view.");
+                    if (host.Calibrate(method["calibration.".Length..], from, out string? refused) is not { } state)
+                        return Error(id, InvalidParams, refused ?? "Glasses setup could not do that now.");
+                    result = state;
                     break;
                 }
                 case "bot.report":

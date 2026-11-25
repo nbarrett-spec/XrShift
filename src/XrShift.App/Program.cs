@@ -113,6 +113,7 @@ internal static class Program
               --keep-monitors            do not add or remove virtual monitors when starting, quitting or switching profile
               --no-capture               stand-in pictures instead of live monitors
               --no-settings              do not open the settings window at start (Ctrl+Alt+S opens it)
+              --no-keys                  take no keys and never the keyboard: for a trial driven by a script (--api) while someone types
               --api                      let other programs on this PC list the scene, drive bots and switch layouts (pipe ArWorkspace.Api);
                                          the tray menu remembers this choice for every start
               --stereo                   start in 3D: a picture per eye, side by side, for the glasses' 3D mode (Ctrl+Alt+D switches)
@@ -137,7 +138,7 @@ internal static class Program
               --replay-capture IMU --out DIR   run the head tracker over a recording ('xrprobe dump' or 'synth') and save the
                 --seconds S --every MS         frame the wearer sees every MS ms for S seconds, with DIR\poses.csv
                 --predict MS --layout F --deck F   (prediction default 25 ms; layout default one test screen ahead)
-              --settings-shot FILE.png   save a picture of the settings window and exit (--page home|welcome|screen|follow|stationary|hands|games|bots|voice|pcs|settings|advanced|keys, --stationary, --sample-bots)
+              --settings-shot FILE.png   save a picture of the settings window and exit (--page home|welcome|screen|follow|stationary|hands|games|bots|voice|pcs|settings|setup|advanced|keys, --stationary, --sample-bots)
             Keys, from any program: Ctrl+Alt+0 (or Home, or Space) recentre, Ctrl+Alt+S settings, Ctrl+Alt+Q quit,
             Ctrl+Alt+1 to 4 profiles, Ctrl+Alt+G game mode (glasses show their own desktop),
             Ctrl+Alt+M bring the mouse pointer to where you are looking,
@@ -315,6 +316,39 @@ internal static class Program
         public bool Ruler { get; init; }
         /// <summary>Spots to point the eye to: the mouse pointer, a window that just opened.</summary>
         public List<MarkEntry> Marks { get; init; } = [];
+        /// <summary>Glasses setup's guide, given as data: then only the guide is drawn over the room, as in the app.</summary>
+        public GuideEntry? Guide { get; init; }
+    }
+
+    /// <summary>
+    /// One moment of glasses setup: the words, and the lines and crosses in display pixels from the middle of the view
+    /// (x right, y up), or with world set in room degrees (x = yaw left, y = pitch up).
+    /// </summary>
+    sealed record GuideEntry
+    {
+        public string Instruction { get; init; } = "";
+        public string Progress { get; init; } = "";
+        public string? Note { get; init; }
+        public List<string> Results { get; init; } = [];
+        public List<GuideLineEntry> Lines { get; init; } = [];
+        public List<float[]> Marks { get; init; } = [];
+
+        public SetupScreen ToScreen()
+        {
+            static Vector2 V(float[] p) => p.Length == 2 ? new Vector2(p[0], p[1]) : throw new JsonException("A guide point is [x, y].");
+            return new SetupScreen(
+                new GuideDrawing(
+                    [.. Lines.Select(l => new GuideLine(l.World ? GuideSpace.World : GuideSpace.Display, V(l.From), V(l.To)))],
+                    [.. Marks.Select(m => new GuideMark(GuideSpace.Display, V(m)))]),
+                Instruction, Progress, Note, Results);
+        }
+    }
+
+    sealed record GuideLineEntry
+    {
+        public float[] From { get; init; } = [0, 0];
+        public float[] To { get; init; } = [0, 0];
+        public bool World { get; init; }
     }
 
     /// <summary>A mark on a screen of the layout: X and Y run 0 to 1 across its picture from the top left.</summary>
@@ -361,12 +395,16 @@ internal static class Program
     /// <summary>Draws everything the wearer sees from this head direction and reads it back as a picture.</summary>
     static Bitmap DrawFrame(Renderer renderer, SpaceScene scene, Quaternion head, DisplayOptics optics, ViewSettings view, ShotFrame frame, string status, float seconds = 1f)
     {
-        scene.RulerVisible = frame.Ruler;
+        SetupScreen? guide = frame.Guide?.ToScreen();
+        scene.RulerVisible = frame.Ruler && guide is null;
         scene.Stereo = frame.Stereo;
-        scene.SetNotice(frame.Notice ?? "", SpaceScene.GuessNoticeLevel(frame.Notice ?? ""));
+        scene.SetNotice(guide is null ? frame.Notice ?? "" : "", SpaceScene.GuessNoticeLevel(frame.Notice ?? ""));
         scene.SetStatus(frame.Notice is null ? status : "");
+        scene.OverlayVisible = guide is null;
         Quaternion trim = Quaternion.CreateFromYawPitchRoll(0, -view.LevelDeg * DegToRad, view.RollDeg * DegToRad);
-        scene.Look(head * trim, false, false, seconds, view.EasyReading, clock: frame.Time);
+        // During setup only the guide shows over the room, as in the app: screens, bots and arrows are hidden.
+        scene.Look(head * trim, false, guide is not null, seconds, view.EasyReading, clock: frame.Time);
+        scene.SetGuide(guide, head * trim, optics);
         scene.PointToHiddenScreens(head * trim, optics, view.EdgeArrows);
         scene.SetMenu(frame.Menu ? ["Hide all", "Recentre", "Put here", "Next profile", "Close"] : null, 1);
         renderer.Draw(head * trim, optics, frame.Stereo ? Camera.DefaultEyeSeparation : 0);

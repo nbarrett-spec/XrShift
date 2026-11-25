@@ -375,16 +375,105 @@ internal static class Pictures
                 g.DrawString(text, font, ink, RectangleF.Inflate(plate, -Style.Pad, 0), Style.Centred);
                 return picture;
             }
-            using Font loud = Style.Face(Style.Title, bold: true);
-            const float maxText = 1100, pad = 18;
-            float badge = loud.Height * 1.1f;
-            var wrap = new StringFormat { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisWord, FormatFlags = StringFormatFlags.LineLimit };
-            SizeF size = g.MeasureString(text, loud, new SizeF(maxText, loud.Height * 2.05f), wrap);
-            float width = size.Width + badge + pad * 2 + 8, height = MathF.Max(size.Height, loud.Height) + pad * 1.4f;
-            var box = new RectangleF((NoticeWidth - width) / 2, 4, width, height);
-            Style.Plate(g, box, rim: Style.Attention, rimWidth: 4);
-            Style.Badge(g, new PointF(box.X + pad + badge * 0.42f, box.Y + box.Height / 2), badge * 0.42f, HintKind.NeedsYou);
-            g.DrawString(text, loud, ink, new RectangleF(box.X + pad + badge, box.Y, size.Width + 8, box.Height), wrap);
+            NeedsYou(g, text, NoticeWidth / 2f, 4);
+        }
+        return picture;
+    }
+
+    /// <summary>The needs-you look: large bold words, up to two lines, on a plate with a warm rim and a "!" badge. Returns the plate.</summary>
+    static RectangleF NeedsYou(Graphics g, string text, float centreX, float top)
+    {
+        using var ink = new SolidBrush(Style.Ink);
+        using Font loud = Style.Face(Style.Title, bold: true);
+        const float maxText = 1100, pad = 18;
+        float badge = loud.Height * 1.1f;
+        var wrap = new StringFormat { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisWord, FormatFlags = StringFormatFlags.LineLimit };
+        SizeF size = g.MeasureString(text, loud, new SizeF(maxText, loud.Height * 2.05f), wrap);
+        float width = size.Width + badge + pad * 2 + 8, height = MathF.Max(size.Height, loud.Height) + pad * 1.4f;
+        var box = new RectangleF(centreX - width / 2, top, width, height);
+        Style.Plate(g, box, rim: Style.Attention, rimWidth: 4);
+        Style.Badge(g, new PointF(box.X + pad + badge * 0.42f, box.Y + box.Height / 2), badge * 0.42f, HintKind.NeedsYou);
+        g.DrawString(text, loud, ink, new RectangleF(box.X + pad + badge, box.Y, size.Width + 8, box.Height), wrap);
+        return box;
+    }
+
+    /// <summary>The guide picture covers the whole view one picture pixel for one display pixel, so lines land where the maths puts them.</summary>
+    public const int GuideWidth = 1920, GuideHeight = 1080;
+
+    /// <summary>
+    /// What the glasses show during glasses setup, over the room (black is see-through): the lines and crosses to lay on
+    /// real edges, in picture pixels from the top-left; at the top where setup is, what to do, and why a press was
+    /// refused; at the bottom what was found. Lines are 2 pixels of light inside a dark outline: thin enough to lie
+    /// exactly on an edge, still an edge over a bright screen. The words go over the lines, so they can always be read.
+    /// </summary>
+    public static Bitmap Guide(IReadOnlyList<(PointF From, PointF To)> lines, IReadOnlyList<PointF> marks,
+        string progress, string instruction, string? note, IReadOnlyList<string> results)
+    {
+        Bitmap picture = NewPicture(GuideWidth, GuideHeight, out Graphics g);
+        using (g)
+        {
+            g.Clear(Color.Transparent);
+            // Coordinates are pixel edges here, as GuideDrawing.ToPicture gives them: x = 960 is the line between
+            // the two middle columns, and a 2 pixel line there covers exactly those two.
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+            const float arm = 28;
+            using (var outline = new Pen(Style.Shade, 6) { StartCap = LineCap.Round, EndCap = LineCap.Round })
+            {
+                foreach ((PointF a, PointF b) in lines) g.DrawLine(outline, a, b);
+                foreach (PointF m in marks)
+                {
+                    g.DrawLine(outline, m.X - arm, m.Y, m.X + arm, m.Y);
+                    g.DrawLine(outline, m.X, m.Y - arm, m.X, m.Y + arm);
+                }
+            }
+            using (var light = new Pen(Style.Ink, 2))
+            {
+                foreach ((PointF a, PointF b) in lines) g.DrawLine(light, a, b);
+                foreach (PointF m in marks)
+                {
+                    g.DrawLine(light, m.X - arm, m.Y, m.X + arm, m.Y);
+                    g.DrawLine(light, m.X, m.Y - arm, m.X, m.Y + arm);
+                }
+            }
+            g.PixelOffsetMode = PixelOffsetMode.Default;
+
+            float y = 24;
+            var wrap = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisWord };
+            if (progress.Length > 0)
+            {
+                using Font small = Style.Face(Style.Small, bold: true);
+                float w = g.MeasureString(progress, small).Width + Style.Pad * 2;
+                var plate = new RectangleF((GuideWidth - w) / 2, y, w, small.Height + 10);
+                Style.Plate(g, plate, rim: Style.QuietRim);
+                using var accent = new SolidBrush(Style.Accent);
+                g.DrawString(progress, small, accent, plate, Style.Centred);
+                y = plate.Bottom + 8;
+            }
+            if (instruction.Length > 0)
+            {
+                using Font big = Style.Face(Style.Title);
+                const float maxText = 1320, pad = 18;
+                SizeF size = g.MeasureString(instruction, big, new SizeF(maxText, big.Height * 4.1f), wrap);
+                var plate = new RectangleF((GuideWidth - size.Width - pad * 2) / 2, y, size.Width + pad * 2, size.Height + pad * 1.2f);
+                Style.Plate(g, plate);
+                using var ink = new SolidBrush(Style.Ink);
+                g.DrawString(instruction, big, ink, RectangleF.Inflate(plate, -pad + 2, 0), wrap);
+                y = plate.Bottom + 10;
+            }
+            if (note is { Length: > 0 }) NeedsYou(g, note, GuideWidth / 2f, y);
+
+            if (results.Count > 0)
+            {
+                using Font body = Style.Face(Style.Body);
+                const float maxText = 1320, pad = 16;
+                string text = string.Join("\n", results);
+                var left = new StringFormat { LineAlignment = StringAlignment.Center, Trimming = StringTrimming.EllipsisWord };
+                SizeF size = g.MeasureString(text, body, new SizeF(maxText, body.Height * 9.1f), left);
+                var plate = new RectangleF((GuideWidth - size.Width - pad * 2) / 2, GuideHeight - 24 - size.Height - pad * 1.2f, size.Width + pad * 2, size.Height + pad * 1.2f);
+                Style.Plate(g, plate, rim: Style.Done);
+                using var ink = new SolidBrush(Style.Ink);
+                g.DrawString(text, body, ink, RectangleF.Inflate(plate, -pad + 2, 0), left);
+            }
         }
         return picture;
     }

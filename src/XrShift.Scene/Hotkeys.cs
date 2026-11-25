@@ -36,6 +36,7 @@ public static class Hotkeys
         new(0x48, "H", "Show or hide the status line in the glasses"),
         new(0x47, "G", "Plain screen (game mode) on or off"),
         new(0x56, "V", "VR on or off"),
+        new(0x43, "C", "Glasses setup, guided in the glasses: then Space confirms, Backspace retries, S skips, Esc cancels"),
         new(0xDB, "[", "Glasses delay down / up"),
         new(0xDD, "]", "Glasses delay down / up"),
         new(0xBD, "-", "View angle smaller / bigger"),
