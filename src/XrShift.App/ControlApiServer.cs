@@ -103,8 +103,13 @@ internal sealed class ControlApiServer : IDisposable
 }
 
 /// <summary>The live session, as the Control API sees it. Every member runs on the window thread.</summary>
-internal sealed class ControlHost(Func<Workspace> workspace, Action<Workspace> useWorkspace, Func<Deck> deck, Action<Deck> useDeck, Action<string> focus, Func<string, string, string?> tell, Func<string, Uri, string?> openWidget) : IControlHost
+internal sealed class ControlHost(Func<Workspace> workspace, Action<Workspace> useWorkspace, Func<Deck> deck, Action<Deck> useDeck, Action<string> focus, Func<string, string, string?> tell, Func<string, Uri, string?> openWidget,
+    Func<ScreenSpec, (int Width, int Height)> pictureSize, Func<DisplayOptics> optics) : IControlHost
 {
+    /// <summary>The real size of the monitor or window a screen shows, so presets size it as it will be drawn.</summary>
+    public (int Width, int Height) PictureSize(ScreenSpec screen) => pictureSize(screen);
+    /// <summary>The view angle in use now (the held picture's in stationary mode).</summary>
+    public DisplayOptics Optics => optics();
     public string? OpenWidget(string label, Uri page) => openWidget(label, page);
     public IReadOnlyList<string> Projects => [.. XrShift.App.Projects.Load().Keys];
     public string? Spawn(string project) => XrShift.App.Projects.Spawn(project);

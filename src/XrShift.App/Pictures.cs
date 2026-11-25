@@ -340,6 +340,23 @@ internal static class Pictures
         return picture;
     }
 
+    public const int RingSize = 160;
+
+    /// <summary>A ring drawn round the mouse pointer for a moment, so the eye finds it. Black is see-through.</summary>
+    public static Bitmap Ring()
+    {
+        Bitmap picture = NewPicture(RingSize, RingSize, out Graphics g);
+        using (g)
+        {
+            g.Clear(Color.Transparent);
+            using var outer = new Pen(Color.FromArgb(94, 234, 212), 10f);
+            using var inner = new Pen(Color.FromArgb(200, Ink), 3f);
+            g.DrawEllipse(outer, 8, 8, RingSize - 16, RingSize - 16);
+            g.DrawEllipse(inner, 20, 20, RingSize - 40, RingSize - 40);
+        }
+        return picture;
+    }
+
     public static Bitmap Status(string text)
     {
         Bitmap picture = NewPicture(StatusWidth, StatusHeight, out Graphics g);
