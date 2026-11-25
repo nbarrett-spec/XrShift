@@ -86,6 +86,8 @@ internal sealed partial class Voice : IDisposable
         Add(VoiceCommands.HideWords, screens);
         Add(VoiceCommands.LoadWords, Spoken(known.Layouts));
         Add([VoiceCommands.SpawnPhrase], Spoken(known.Projects));
+        Add([VoiceCommands.LayoutWord], VoiceCommands.LayoutNames);
+        Add([VoiceCommands.SizeWord], VoiceCommands.SizeNames);
         Add(VoiceCommands.TellWords, Spoken(known.Objects.Where(o => o.Kind == "bot").Select(o => o.Label)), thenFreeSpeech: true);
         return grammars;
     }

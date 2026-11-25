@@ -5,7 +5,7 @@ namespace XrShift.Scene;
 
 /// <summary>
 /// Turns a spoken sentence into one Control API request. The starting set is small and fixed, so plain rules
-/// do it: "open/hide X", "load X", "new bot in X", "tell X to ...".
+/// do it: "open/hide X", "load X", "layout X", "size X", "new bot in X", "tell X to ...".
 /// shortcut: rules only understand these shapes; put a language model here if people want to phrase things freely.
 /// </summary>
 public static partial class VoiceCommands
@@ -14,7 +14,12 @@ public static partial class VoiceCommands
     public sealed record Known(IReadOnlyList<ScreenSpec> Screens, IReadOnlyList<SceneObject> Objects, IReadOnlyList<string> Layouts, IReadOnlyList<string> Projects);
 
     public static readonly string[] OpenWords = ["open", "show"], HideWords = ["hide", "close"], LoadWords = ["load", "switch to"], TellWords = ["tell", "ask"];
-    public const string SpawnPhrase = "new bot in";
+    public const string SpawnPhrase = "new bot in", LayoutWord = "layout", SizeWord = "size";
+
+    /// <summary>The preset names as they are said: "main and side", "triple arc", "sharp".</summary>
+    public static readonly string[] LayoutNames = Enum.GetNames<LayoutPreset>().Select(Spoken).ToArray(), SizeNames = Enum.GetNames<SizePreset>().Select(Spoken).ToArray();
+
+    static string Spoken(string name) => WordStarts().Replace(name, " ").ToLowerInvariant();
 
     /// <returns>The request to send, or null with <paramref name="why"/> saying what was not understood.</returns>
     public static JsonObject? Parse(string heard, Known known, out string why)
@@ -47,6 +52,18 @@ public static partial class VoiceCommands
             why = "No layout by that name.";
             return null;
         }
+        if (After(said, [LayoutWord]) is { } layoutPreset)
+        {
+            if (Presets.TryParse(layoutPreset, out LayoutPreset how)) return Request("preset.apply", ("layout", how.ToString()));
+            why = "No layout preset by that name.";
+            return null;
+        }
+        if (After(said, [SizeWord]) is { } sizePreset)
+        {
+            if (Presets.TryParse(sizePreset, out SizePreset size)) return Request("preset.apply", ("size", size.ToString()));
+            why = "No size by that name.";
+            return null;
+        }
         bool open = After(said, OpenWords) is not null;
         if ((After(said, OpenWords) ?? After(said, HideWords)) is { } name)
         {
@@ -56,7 +73,7 @@ public static partial class VoiceCommands
             why = open ? "Nothing by that name." : "No screen by that name.";
             return null;
         }
-        why = "Try: open, hide, load, new bot in, or tell ... to ...";
+        why = "Try: open, hide, load, layout, size, new bot in, or tell ... to ...";
         return null;
     }
 
@@ -92,4 +109,5 @@ public static partial class VoiceCommands
 
     [GeneratedRegex(@"[^\p{L}\p{N}]+")] private static partial Regex NotWords();
     [GeneratedRegex(@"\s+")] private static partial Regex Spaces();
+    [GeneratedRegex(@"(?<=[a-z])(?=[A-Z])")] private static partial Regex WordStarts();
 }
