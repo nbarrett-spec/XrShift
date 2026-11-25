@@ -29,6 +29,7 @@ internal static class Program
             case "dump": return Dump(path ?? Path.Combine("recordings", "imu.bin"), Seconds(args, 5));
             case "axes": return Axes();
             case "rest": return Rest(Seconds(args, 40));
+            case "setup": return Setup(path, Option(args, "--from"));
             case "analyze" when path is not null: return Analyze(path);
             case "replay" when path is not null: return Replay(path);
             case "steady" when path is not null: return Steady(path);
@@ -48,6 +49,8 @@ internal static class Program
             xrprobe steady <file>              score picture steadiness on a recording, old prediction vs new
             xrprobe axes                       worn: measure how the sensor sits in the frame (10 s)
             xrprobe rest [--seconds N]         on a desk: measure the gyro's resting offset
+            xrprobe setup [file] [--from S]    rest offset, then axes, as one guided run; S = rest|axes|level|view.
+                                               With a recording, replays it and saves nothing.
             xrprobe synth <file>               write a fake recording (no glasses needed)
             xrprobe serve <file> [--port N]    act as the glasses on this PC, playing a recording
             Any command that reads the glasses takes --host H --port N (e.g. 127.0.0.1 for 'serve').
@@ -340,102 +343,82 @@ internal static class Program
 
     // ---- axes ---------------------------------------------------------------------------
 
-    /// <summary>On the One Pro+ sensor X points to the wearer's right (measured 2026-11-15). Catches a look down or a head tilt.</summary>
-    static readonly Vector3 ExpectedRight = Vector3.UnitX;
-
     static int Axes()
     {
         using CancellationTokenSource cts = MakeCts(0);
-        var hold = new HoldDetector(1.5f);
-        var turned = new MotionWindow();
+        bool hadBias = TrackingConfig.TryLoadGyroBias(out Vector3 bias);
+        var check = new AxisCheck(hadBias ? bias : null);
         var conn = NewConnection();
-        conn.Sample += hold.Add;
-        conn.Sample += turned.Add;
+        conn.Sample += check.Add;
 
         using FileStream? raw = OpenRaw("axes-last.bin");
         conn.RawTee = raw;
         Thread thread = conn.Start(cts.Token);
 
-        int result = RunAxes(conn, hold, turned, cts.Token);
+        int result = WaitForData(conn, cts.Token) ? RunAxes(check, hadBias, save: true, cts.Token) : 2;
         cts.Cancel();
         thread.Join(5000);
         return result;
     }
 
-    static int RunAxes(GlassesConnection conn, HoldDetector hold, MotionWindow turned, CancellationToken ct)
+    /// <summary>Talks the wearer through an <see cref="AxisCheck"/> that is being fed elsewhere, and saves what it found.</summary>
+    static int RunAxes(AxisCheck check, bool hadBias, bool save, CancellationToken ct)
     {
-        if (!WaitForData(conn, ct)) return 2;
-
         Console.WriteLine("Axis check: two steps, about 10 seconds. Wear the glasses and sit normally.");
         Console.WriteLine("Each step ends with a beep; there is no countdown.");
         Console.WriteLine();
-        Console.WriteLine("1/2  Look straight ahead and hold still");
-        hold.Reset();
-        if (!WaitForHold(hold, _ => true, 15, ct, out HoldReading level, out _))
+        Console.WriteLine($"1/2  {AxisCheck.InstructionFor(AxisCheckStage.Level)}");
+        if (!WaitWhile(check, AxisCheckStage.Level, ct)) return 1;
+        if (check.LevelReading is not { } level)
         {
-            Console.WriteLine("     Never steady for 1.5 seconds. Nothing saved; run it again.");
+            Console.WriteLine($"     {check.Failure}");
             return 2;
         }
-        turned.Reset();
         Beep();
         Console.WriteLine("     Got it.");
 
-        Vector3 upLevel = Vector3.Normalize(level.AccelMean);
         Console.WriteLine();
-        Console.WriteLine("2/2  Nod UP about 30 degrees (chin up, no turning or tilting) and hold until the beep");
-        hold.Reset();
-        bool got = WaitForHold(hold, r => AngleDeg(upLevel, r.AccelMean) >= 12f, 15, ct, out HoldReading looking, out _);
-        Motion between = turned.Snapshot();
-        if (ct.IsCancellationRequested) return 1;
-        if (!got)
+        Console.WriteLine($"2/2  {AxisCheck.InstructionFor(AxisCheckStage.LookUp)}");
+        if (!WaitWhile(check, AxisCheckStage.LookUp, ct)) return 1;
+        if (check.LookUpReading is null)
         {
-            Console.WriteLine("     No steady look up of at least 12 degrees seen. Nothing saved; run it again.");
+            Console.WriteLine($"     {check.Failure}");
             return 2;
         }
         Beep();
         Console.WriteLine("     Got it. Relax.");
         Console.WriteLine();
 
-        bool hadBias = TrackingConfig.TryLoadGyroBias(out Vector3 bias);
-        if (!hadBias) bias = level.GyroMean;
-
-        if (!AxisMap.TryFromLevelAndLookUp(level.AccelMean, looking.AccelMean, out AxisMap map, out float pitchDeg))
+        if (check.Result is not { } r)
         {
-            Console.WriteLine("Could not tell the side axis from the two readings. Nothing saved; run it again.");
+            Console.WriteLine(check.Failure);
             return 2;
         }
+        return ReportAxes(r, hadBias, save) ? 0 : 2;
+    }
 
-        // The gyro saw the same nod; it should agree with what gravity says.
-        Vector3 rotation = between.Rotation(bias);
-        float turnDeg = Vector3.Dot(rotation, upLevel) * RadToDeg;
-        Vector3 nod = rotation - Vector3.Dot(rotation, upLevel) * upLevel;
-        float gyroPitchDeg = nod.Length() * RadToDeg;
-        float agreeDeg = gyroPitchDeg > 3 ? AngleDeg(nod, map.Right) : float.NaN;
-        float sideDeg = AngleDeg(map.Right, ExpectedRight);
-
+    /// <summary>Prints what an axis check found and, if it is good and <paramref name="save"/>, saves it. False if refused.</summary>
+    static bool ReportAxes(AxisCheckResult r, bool hadBias, bool save)
+    {
+        HoldReading level = r.Level;
         Console.WriteLine($"Gyro while holding still reads {Deg(level.GyroMean)} deg/s");
-        Console.WriteLine($"Level:      gravity {level.AccelMean.Length():F2} m/s2 along {Vec(upLevel)}, steady within {level.TiltSpreadDeg:F1} deg");
-        Console.WriteLine($"Looking up: {pitchDeg:F0} deg (gyro says {gyroPitchDeg:F0}), steady within {looking.TiltSpreadDeg:F1} deg, head turned {MathF.Abs(turnDeg):F0} deg {(turnDeg >= 0 ? "left" : "right")}");
-        Console.WriteLine($"Side axis:  {Vec(map.Right)}, {sideDeg:F1} deg off sensor X, gyro agrees within {agreeDeg:F0} deg");
+        Console.WriteLine($"Level:      gravity {level.AccelMean.Length():F2} m/s2 along {Vec(Vector3.Normalize(level.AccelMean))}, steady within {level.TiltSpreadDeg:F1} deg");
+        Console.WriteLine($"Looking up: {r.PitchDeg:F0} deg (gyro says {r.GyroPitchDeg:F0}), steady within {r.LookingUp.TiltSpreadDeg:F1} deg, head turned {MathF.Abs(r.TurnDeg):F0} deg {(r.TurnDeg >= 0 ? "left" : "right")}");
+        Console.WriteLine($"Side axis:  {Vec(r.Map.Right)}, {r.SideDeg:F1} deg off sensor X, gyro agrees within {r.AgreeDeg:F0} deg");
 
-        if (sideDeg > 150)
+        if (r.Problem is not null)
         {
-            Console.WriteLine("That read as looking DOWN, not up. Nothing saved; run it again.");
-            return 2;
-        }
-        if (sideDeg > 20)
-        {
-            Console.WriteLine("The head tilted sideways during the nod. Nothing saved; run it again.");
-            return 2;
-        }
-        if (agreeDeg > 45)
-        {
-            Console.WriteLine("Gyro and gravity disagree about the nod. Nothing saved; run it again.");
-            return 2;
+            Console.WriteLine(r.Problem);
+            return false;
         }
 
-        TrackingConfig.SaveAxes(map);
-        Console.WriteLine($"Axes: {map}");
+        Console.WriteLine($"Axes: {r.Map}");
+        if (!save)
+        {
+            Console.WriteLine("Replaying a recording: nothing saved.");
+            return true;
+        }
+        TrackingConfig.SaveAxes(r.Map);
         Console.WriteLine($"Saved to {TrackingConfig.AxesPath}");
 
         if (!hadBias)
@@ -443,7 +426,207 @@ internal static class Program
             TrackingConfig.SaveGyroBias(level.GyroMean);
             Console.WriteLine("Gyro offset saved from the worn reading. 'xrprobe rest' on a desk gives a more exact one.");
         }
-        return 0;
+        return true;
+    }
+
+    // ---- setup --------------------------------------------------------------------------
+
+    /// <summary>
+    /// The whole glasses setup in the console, or replayed from a recording. Steps that need lines drawn in the
+    /// glasses are skipped and named; the app runs those.
+    /// </summary>
+    static int Setup(string? path, string? from)
+    {
+        SetupStepKind? start = from?.ToLowerInvariant() switch
+        {
+            null or "rest" => SetupStepKind.Rest,
+            "axes" => SetupStepKind.Axes,
+            "level" or "lean" => SetupStepKind.LevelLean,
+            "view" => SetupStepKind.ViewAngle,
+            _ => null,
+        };
+        if (start is null) return Usage();
+
+        bool hadBias = TrackingConfig.TryLoadGyroBias(out Vector3 saved);
+        var setup = new GlassesSetup(new SetupOptions(TrackingConfig.LoadAxes(), hadBias ? saved : null, StartAt: start.Value));
+        var talk = new SetupTalk(setup, hadBias, save: path is null);
+
+        if (path is not null)
+        {
+            var samples = new List<ImuSample>();
+            new ImuFrameParser().Feed(File.ReadAllBytes(path), samples.Add);
+            Console.WriteLine($"Replaying {samples.Count} samples from {path}. Nothing is saved.");
+            bool going = talk.Report();
+            foreach (ImuSample s in samples)
+            {
+                if (!going) break;
+                setup.Add(s);
+                going = talk.Report();
+            }
+            if (going) Console.WriteLine("The recording ended before setup did.");
+            return talk.ExitCode;
+        }
+
+        using CancellationTokenSource cts = MakeCts(0);
+        var gate = new object();
+        var conn = NewConnection();
+        conn.Sample += s => { lock (gate) setup.Add(s); };
+        using FileStream? raw = OpenRaw("setup-last.bin");
+        conn.RawTee = raw;
+        Thread thread = conn.Start(cts.Token);
+
+        if (WaitForData(conn, cts.Token))
+        {
+            long count = -1;
+            var quiet = Stopwatch.StartNew();
+            while (!cts.IsCancellationRequested)
+            {
+                lock (gate) if (!talk.Report()) break;
+                if (conn.Parser.SamplesParsed != count) { count = conn.Parser.SamplesParsed; quiet.Restart(); }
+                else if (quiet.Elapsed.TotalSeconds > 5) { Console.WriteLine("Lost the glasses. Run 'xrprobe live' to check the link."); break; }
+                cts.Token.WaitHandle.WaitOne(50);
+            }
+        }
+        cts.Cancel();
+        thread.Join(5000);
+        return cts.IsCancellationRequested && !setup.Finished ? 1 : talk.ExitCode;
+    }
+
+    /// <summary>Says what a <see cref="GlassesSetup"/> wants each time that changes, beeps when a hold is taken, and saves results.</summary>
+    sealed class SetupTalk(GlassesSetup setup, bool hadBias, bool save)
+    {
+        string? _said;
+        SetupStepKind _step = (SetupStepKind)(-1);
+        bool _over;
+
+        public int ExitCode { get; private set; } = 2;
+
+        /// <summary>False once setup has finished or stopped on a failure.</summary>
+        public bool Report()
+        {
+            while (!_over)
+            {
+                if (_step != setup.Step || setup.Finished) StepChanged();
+                if (_over) break;
+
+                if (GlassesSetup.NeedsDrawing(setup.Step) && setup.StatusOf(setup.Step) == SetupStepStatus.Running)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine($"Skipped {Name(setup.Step)}: it needs lines drawn in the glasses, so the app runs it.");
+                    setup.Skip();
+                    continue;
+                }
+
+                if (setup.Waiting == SetupWait.Nothing)
+                {
+                    string failure = setup.FailureOf(setup.Step) ?? "";
+                    if (setup.Step == SetupStepKind.Axes && setup.AxisAttempt is { } r)
+                        ReportAxes(r, true, false); // prints the numbers and the problem
+                    else
+                        Console.WriteLine($"     {failure}");
+                    if (setup.Step == SetupStepKind.Rest)
+                    {
+                        Console.WriteLine("     Going on without it: the axis check will take the offset from the worn reading.");
+                        setup.Skip();
+                        continue;
+                    }
+                    Console.WriteLine($"Stopped. To try again from here: xrprobe setup --from {Flag(setup.Step)}");
+                    _over = true;
+                    break;
+                }
+
+                string say = setup.Instruction;
+                if (say == _said) return true;
+                if (_said is not null)
+                {
+                    if (_saidWait == SetupWait.Neutral) Console.WriteLine("     Level and still.");
+                    else
+                    {
+                        Beep(); // the axis check's level hold was taken
+                        Console.WriteLine("     Got it.");
+                    }
+                }
+                Console.WriteLine();
+                Console.WriteLine($"{(int)setup.Step + 1}/4  {say}");
+                _said = say;
+                _saidWait = setup.Waiting;
+                return true;
+            }
+            return false;
+        }
+
+        SetupWait _saidWait;
+
+        void StepChanged()
+        {
+            if ((int)_step >= 0 && setup.StatusOf(_step) == SetupStepStatus.Done) Finished(_step);
+            _said = null;
+            if (setup.Finished)
+            {
+                Console.WriteLine();
+                foreach (SetupStepKind k in Enum.GetValues<SetupStepKind>())
+                    Console.WriteLine($"  {Name(k),-15} {setup.StatusOf(k).ToString().ToLowerInvariant()}");
+                ExitCode = 0; // a failed axis check stops before here; a failed rest is made up for by the worn reading
+                _over = true;
+                return;
+            }
+            _step = setup.Step;
+        }
+
+        void Finished(SetupStepKind step)
+        {
+            Beep();
+            SetupResults r = setup.Results;
+            switch (step)
+            {
+                case SetupStepKind.Rest when r.GyroBias is { } bias:
+                    Console.WriteLine($"     Got it. Gyro at rest reads {Deg(bias)} deg/s");
+                    if (save)
+                    {
+                        TrackingConfig.SaveGyroBias(bias);
+                        Console.WriteLine($"     Saved to {TrackingConfig.GyroPath}");
+                    }
+                    hadBias = true;
+                    break;
+                case SetupStepKind.Axes when r.Axes is { } axes:
+                    Console.WriteLine("     Got it. Relax.");
+                    Console.WriteLine();
+                    ReportAxes(axes, hadBias, save);
+                    break;
+            }
+        }
+
+        static string Name(SetupStepKind k) => k switch
+        {
+            SetupStepKind.Rest => "gyro offset",
+            SetupStepKind.Axes => "sensor axes",
+            SetupStepKind.LevelLean => "level and lean",
+            _ => "view angle",
+        };
+
+        static string Flag(SetupStepKind k) => k switch
+        {
+            SetupStepKind.Rest => "rest",
+            SetupStepKind.Axes => "axes",
+            SetupStepKind.LevelLean => "level",
+            _ => "view",
+        };
+    }
+
+    /// <summary>
+    /// Waits for the check to leave a stage. False if cancelled. The check times out by the samples' clock;
+    /// this also gives up by the wall clock, in case the samples stop.
+    /// </summary>
+    static bool WaitWhile(AxisCheck check, AxisCheckStage stage, CancellationToken ct)
+    {
+        var clock = Stopwatch.StartNew();
+        while (check.Stage == stage)
+        {
+            if (ct.IsCancellationRequested) return false;
+            if (clock.Elapsed.TotalSeconds > AxisCheck.StepSeconds + 3) check.TimeOut();
+            ct.WaitHandle.WaitOne(50);
+        }
+        return true;
     }
 
     // ---- rest ---------------------------------------------------------------------------
@@ -552,59 +735,6 @@ internal static class Program
     static void Beep()
     {
         try { Console.Beep(); } catch (PlatformNotSupportedException) { }
-    }
-
-    static float AngleDeg(Vector3 a, Vector3 b) =>
-        MathF.Acos(Math.Clamp(Vector3.Dot(Vector3.Normalize(a), Vector3.Normalize(b)), -1f, 1f)) * RadToDeg;
-
-    /// <summary>Sums the motion seen between Reset and Snapshot.</summary>
-    sealed class MotionWindow
-    {
-        readonly object _gate = new();
-        Vector3 _gyroSum, _accelSum, _rotation;
-        double _time;
-        int _count;
-        ulong _last;
-
-        public void Add(ImuSample s)
-        {
-            lock (_gate)
-            {
-                double dt = _last != 0 && s.TimestampNs > _last ? (s.TimestampNs - _last) * 1e-9 : 0.001;
-                if (dt > 0.05) dt = 0.001;
-                _last = s.TimestampNs;
-                _gyroSum += s.Gyro;
-                _accelSum += s.Accel;
-                _rotation += s.Gyro * (float)dt;
-                _time += dt;
-                _count++;
-            }
-        }
-
-        public void Reset()
-        {
-            lock (_gate)
-            {
-                _gyroSum = _accelSum = _rotation = Vector3.Zero;
-                _time = 0;
-                _count = 0;
-            }
-        }
-
-        public Motion Snapshot()
-        {
-            lock (_gate)
-            {
-                int n = Math.Max(_count, 1);
-                return new Motion(_gyroSum / n, _accelSum / n, _rotation, (float)_time);
-            }
-        }
-    }
-
-    readonly record struct Motion(Vector3 GyroMean, Vector3 AccelMean, Vector3 RawRotation, float Seconds)
-    {
-        /// <summary>Net rotation (radians, as an axis times angle) after removing the resting gyro offset.</summary>
-        public Vector3 Rotation(Vector3 bias) => RawRotation - bias * Seconds;
     }
 
     // ---- helpers ------------------------------------------------------------------------

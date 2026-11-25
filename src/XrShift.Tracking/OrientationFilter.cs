@@ -56,6 +56,7 @@ public sealed class OrientationFilter
 
     ulong _lastTimestamp;
     float _elapsed;
+    bool _biasLive;
 
     readonly Vector3[] _gyroBlocks = new Vector3[BlockCount];
     readonly Vector3[] _accelBlocks = new Vector3[BlockCount];
@@ -71,6 +72,7 @@ public sealed class OrientationFilter
     {
         GyroBias = bias;
         BiasKnown = true;
+        _biasLive = false;
     }
 
     public void Update(in ImuSample s)
@@ -136,16 +138,27 @@ public sealed class OrientationFilter
 
         if (Spread(_gyroBlocks, out Vector3 gyroMean) > StillGyroSpread) return;
         if (Spread(_accelBlocks, out _) > StillAccelSpread) return;
+        // A steady turn about the vertical leaves gravity unchanged and so passes both tests above.
+        if (gyroMean.Length() > TrackingConfig.MaxGyroBias) return;
 
         if (!BiasKnown)
         {
             GyroBias = gyroMean;
             BiasKnown = true;
+            _biasLive = true;
             BiasUpdates++;
         }
         else if ((gyroMean - GyroBias).Length() < BiasStep)
         {
             GyroBias = Vector3.Lerp(GyroBias, gyroMean, 0.1f);
+            BiasUpdates++;
+        }
+        else if (_biasLive && gyroMean.Length() < GyroBias.Length())
+        {
+            // The first live offset may have been a slow steady turn. Motion only adds to the resting
+            // reading, so a clearly smaller still reading is the better offset; without this the wrong
+            // one would block every later measurement.
+            GyroBias = gyroMean;
             BiasUpdates++;
         }
     }
