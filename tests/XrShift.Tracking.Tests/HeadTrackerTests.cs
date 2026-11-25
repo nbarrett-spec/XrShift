@@ -126,6 +126,35 @@ public class HeadTrackerTests
     }
 
     [Fact]
+    public void ASteadyTurnFromTheStartIsNotTakenForTheGyroOffset()
+    {
+        // No saved offset and no still second yet: turning about the vertical leaves gravity unchanged,
+        // so one steady second of it looked exactly like a resting offset.
+        var sim = new ImuSimulator();
+        var tracker = new HeadTracker();
+        Run(sim, tracker, 0.05f);
+        tracker.GetPose();
+        Run(sim, tracker, 3, yawLeft: 10);
+        Assert.False(tracker.BiasKnown);
+        AssertPose(tracker.GetPose(), 30, 0, 0, 0.6f);
+    }
+
+    [Fact]
+    public void AnOffsetLearnedFromASlowTurnGivesWayToARealRest()
+    {
+        // Under 3 deg/s a steady turn still passes for an offset; the first real rest must replace it,
+        // or the wrong offset locks out every later measurement and heading drifts for good.
+        var bias = new Vector3(0.002f, -0.003f, 0.001f);
+        var sim = new ImuSimulator { GyroBias = bias };
+        var tracker = new HeadTracker();
+        Run(sim, tracker, 0.05f);
+        Run(sim, tracker, 1.5f, yawLeft: 2);
+        Assert.True(tracker.BiasKnown);
+        Run(sim, tracker, 2);
+        AssertClose(bias, tracker.GyroBias, 0.0005f);
+    }
+
+    [Fact]
     public void StartsFromASavedGyroOffsetWithoutNeedingToSitStill()
     {
         var bias = new Vector3(0.010f, -0.020f, 0.015f); // drifts heading about 1.4 deg/s if ignored

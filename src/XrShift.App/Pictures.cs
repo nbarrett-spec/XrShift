@@ -694,6 +694,29 @@ internal static class Pictures
         return picture;
     }
 
+    public const int RingSize = 160;
+
+    /// <summary>
+    /// A ring drawn round the mouse pointer for a moment, so the eye finds it: in the mouse's colour (as its edge arrow),
+    /// with a light inner ring and a dark outline, so it shows over the room and over bright and dark screens alike.
+    /// Shown at about 0.7 picture pixels per display pixel.
+    /// </summary>
+    public static Bitmap Ring()
+    {
+        Bitmap picture = NewPicture(RingSize, RingSize, out Graphics g);
+        using (g)
+        {
+            g.Clear(Color.Transparent);
+            using var outline = new Pen(Style.Shade, 18f);
+            using var outer = new Pen(Style.Mouse, 10f);
+            using var inner = new Pen(Style.Ink, 4f);
+            g.DrawEllipse(outline, 12, 12, RingSize - 24, RingSize - 24);
+            g.DrawEllipse(outer, 12, 12, RingSize - 24, RingSize - 24);
+            g.DrawEllipse(inner, 12, 12, RingSize - 24, RingSize - 24);
+        }
+        return picture;
+    }
+
     /// <summary>
     /// The status strip at the very top of the view: one small, muted line on a plate just as wide as the text. One
     /// picture pixel per display pixel.

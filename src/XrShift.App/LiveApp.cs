@@ -35,6 +35,8 @@ internal static class LiveApp
         public volatile int MenuHighlight;
         /// <summary>Pictures per second from each copied screen, measured on the drawing thread.</summary>
         public volatile string CaptureRates = "";
+        /// <summary>Spots to point the wearer's eye to (the mouse pointer, a window that just opened). Written by the window thread.</summary>
+        public volatile Mark[] Marks = [];
     }
 
     static bool s_unplugged;
@@ -109,7 +111,7 @@ internal static class LiveApp
     static bool s_ownsMonitors;
 
     /// <summary>A file in the settings folder that says the Control API should be on, as --api does for one run.</summary>
-    static string ApiFlag => Path.Combine(TrackingConfig.Folder, "api-on");
+    internal static string ApiFlag => Path.Combine(TrackingConfig.Folder, "api-on");
 
     /// <summary>What to do when the app is started a second time: the running copy shows itself.</summary>
     static volatile Action? s_show;
@@ -347,7 +349,9 @@ internal static class LiveApp
 
         Workspace workspace = LayoutStore.Load() ?? new Workspace();
         layoutEmpty = () => workspace.Current.Layout.Screens.Count == 0;
-        Layout layout = LayoutStore.WithScreensFor(workspace.Current.Layout, AutoAddable(), OpticsFor(view));
+        // Every monitor tells the desk, also in stationary mode where only some of them get a screen.
+        Layout layout = LayoutStore.WithScreensFor(workspace.Current.Layout, AutoAddable(), OpticsFor(view), out IReadOnlyList<string> hiddenAtStart, sources);
+        Action<IReadOnlyList<string>> tellHidden = _ => { };
         bool statusPinned = false, gameMode = false;
         bool dirty = !ReferenceEquals(layout, workspace.Current.Layout);
         workspace = workspace.WithLayout(layout);
@@ -357,12 +361,12 @@ internal static class LiveApp
         bool blank = false;
         bool stereo = args.Contains("--stereo"); // 3D: one picture per eye, side by side. Not saved: the app always starts sharp.
         Deck deck = new(); // bots, clusters and widgets: they live while the app runs and are not saved
-        var shared = new Shared { Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck, stereo) };
+        var shared = new Shared { Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck.Shown(view.BotNotes), stereo) };
         Action afterPublish = () => { };
         void Publish()
         {
             pinned = WindowFinder.Resolve(layout, pinned, search: false);
-            shared.Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck, stereo);
+            shared.Snapshot = new Snapshot(layout.Zoomed(view.Zoom), sources, pinned, view, statusPinned, blank, deck.Shown(view.BotNotes), stereo);
             afterPublish();
         }
 
@@ -407,18 +411,12 @@ internal static class LiveApp
         Log.Line($"Profile {workspace.Current.Name}: {layout.Screens.Count} screens ({string.Join(", ", layout.Screens.Select(s => s.Name))}).");
 
         // ---- keys ------------------------------------------------------------------------------
+        // The keys and what they do are one list (Hotkeys), which the settings window's key reference shows too.
         // Recentre gets three tries, because other programs often hold one of them already.
-        (Keys Key, string Name)[] recentreKeys = [(Keys.D0, "0"), (Keys.Home, "Home"), (Keys.Space, "Space")];
-        List<string> recentreNames = recentreKeys.Where(k => window.AddHotKey(k.Key)).Select(k => k.Name).ToList();
-        (Keys Key, string Name)[] otherKeys =
-        [
-            (Keys.Q, "Q"), (Keys.S, "S"), (Keys.H, "H"), (Keys.G, "G"), (Keys.OemOpenBrackets, "["), (Keys.OemCloseBrackets, "]"),
-            (Keys.OemMinus, "-"), (Keys.Oemplus, "="), (Keys.D1, "1"), (Keys.D2, "2"), (Keys.D3, "3"), (Keys.D4, "4"),
-            (Keys.M, "M"), (Keys.L, "L"), (Keys.B, "B"), (Keys.PageUp, "PgUp"), (Keys.PageDown, "PgDn"), (Keys.K, "K"), (Keys.P, "P"), (Keys.V, "V"), (Keys.O, "O"), (Keys.D, "D"), (Keys.T, "T"),
-        ];
-        List<string> taken = otherKeys.Where(k => !window.AddHotKey(k.Key)).Select(k => k.Name).ToList();
+        List<string> recentreNames = Hotkeys.All.Where(k => k.Recentre && window.AddHotKey((Keys)k.Code)).Select(k => k.Name).ToList();
+        List<string> taken = Hotkeys.All.Where(k => !k.Recentre && !window.AddHotKey((Keys)k.Code)).Select(k => k.Name).ToList();
         string recentreKey = recentreNames.Count > 0 ? $"Ctrl+Alt+{recentreNames[0]}" : "Space";
-        Log.Line($"Keys, from any program: {recentreKey} recentre, Ctrl+Alt+M mouse to where you look, Ctrl+Alt+L look-to-move on/off, Ctrl+Alt+B hide all, Ctrl+Alt+PgUp/PgDn zoom, Ctrl+Alt+K hand gestures, Ctrl+Alt+P pick up / set down a screen, Ctrl+Alt+O open the bot you look at, Ctrl+Alt+D sharp / 3D, Ctrl+Alt+T talk, Ctrl+Alt+S settings, Ctrl+Alt+Q quit, Ctrl+Alt+1-4 profiles, Ctrl+Alt+G game mode, Ctrl+Alt+H status line, Ctrl+Alt+[ ] glasses delay, Ctrl+Alt+- = view angle.");
+        Log.Line("Keys, from any program: " + string.Join("; ", Hotkeys.Reference().Select(r => $"{r.Keys} {r.What}")) + ".");
         if (taken.Count > 0)
             Log.Line($"Another program already owns Ctrl+Alt+{string.Join(", Ctrl+Alt+", taken)}; those only work with the glasses' window in front.");
 
@@ -505,8 +503,9 @@ internal static class LiveApp
         {
             if (ReferenceEquals(changed, workspace)) return;
             workspace = changed;
-            layout = LayoutStore.WithScreensFor(workspace.Current.Layout, AutoAddable(), OpticsFor(view));
+            layout = LayoutStore.WithScreensFor(workspace.Current.Layout, AutoAddable(), OpticsFor(view), out IReadOnlyList<string> hidden, sources);
             workspace = workspace.WithLayout(layout);
+            tellHidden(hidden);
             ShowProfiles();
             settings.SetLayout(layout, sources);
             Touch(showOverlay: true);
@@ -539,7 +538,9 @@ internal static class LiveApp
         Func<string, string, string?> tellBot = (_, _) => "Not ready yet.";
         Action listen = () => { };
         Func<string, Uri, string?> openWidget = (_, _) => "Not ready yet.";
-        var host = new ControlHost(() => workspace, UseWorkspace, () => deck, UseDeck, id => openObject(id), (id, text) => tellBot(id, text), (label, page) => openWidget(label, page));
+        Func<ScreenSpec, (int, int)> pictureSizeOf = _ => (1920, 1080);
+        var host = new ControlHost(() => workspace, UseWorkspace, () => deck, UseDeck, id => openObject(id), (id, text) => tellBot(id, text), (label, page) => openWidget(label, page),
+            s => pictureSizeOf(s), () => OpticsFor(view));
         // A trial window (--window, --seconds) may run beside the real app: it only has the API when asked, under
         // its own name, so hooks and scripts always reach the real one.
         bool trialRun = args.Contains("--window") || Program.Number(args, "--seconds", 0) > 0;
@@ -593,6 +594,14 @@ internal static class LiveApp
         settings.QuitRequested += window.Close;
         settings.MouseToGazeRequested += () => PointerToGaze();
         settings.BlankChanged += on => { blank = on; Publish(); };
+        // Steadiness from view.txt now, and whenever the window changes it.
+        void Steady(ViewSettings v) { tracker.ReadingSteady = v.ReadingSteady; tracker.MaxLookAheadMs = v.LookAheadMs; }
+        Steady(view);
+        settings.ViewChanged += Steady;
+        settings.BotsSource = () => deck;
+        settings.SetLinks(apiRunning: api is not null, netRunning: net is not null);
+        settings.SetGlassesDisplay(direct ? $"{shownOn.Label}, direct" : shownOn.Label);
+        settings.VoiceTryRequested += () => listen();
 
         // Notes what is loading the graphics cards whenever the glasses start dropping frames.
         using var perf = new PerfWatch(() => (presenter.FramesPerSecond, shownOn.RefreshHz, presenter.SlowFrames, presenter.PoseToScreenMs));
@@ -629,15 +638,7 @@ internal static class LiveApp
         using var tray = new NotifyIcon { Icon = AppIcon.Value, Text = "XrShift", Visible = true };
         using var menu = new ContextMenuStrip();
         menu.Items.Add("Settings", null, (_, _) => ShowSettings());
-        // The Control API (bots, scripts) is off unless asked for. This remembers the choice, so a start from the
-        // Start menu or with Windows has it too. Read at the start of a session, hence "from the next start".
-        var apiItem = new ToolStripMenuItem("Bots and Control API (from the next start)") { Checked = File.Exists(ApiFlag), CheckOnClick = true };
-        apiItem.CheckedChanged += (_, _) =>
-        {
-            try { if (apiItem.Checked) File.WriteAllText(ApiFlag, ""); else File.Delete(ApiFlag); }
-            catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Log.Line($"Could not save the Control API choice: {e.Message}"); }
-        };
-        menu.Items.Add(apiItem);
+        // Bots and the Control API are switched on the settings window's Bots page (the same api-on file).
         menu.Items.Add($"Recentre ({recentreKey})", null, (_, _) => { lock (gate) recenter = true; });
         menu.Items.Add("Plain screen / game mode (Ctrl+Alt+G)", null, (_, _) => setGameMode(!gameMode));
         s_show = () => window.BeginInvoke(ShowSettings);
@@ -889,12 +890,13 @@ internal static class LiveApp
         // The screen in the middle of the wearer's view, and the spot on the real desktop that the middle falls
         // on: a point of a monitor, or of a pinned window wherever that window really is. If the gaze is
         // between screens it is the nearest edge of the nearest one, and Miss says how far off it was.
-        (string Id, Point Point, Rectangle Area, IntPtr Window, float Miss)? FindGaze()
+        // With no head tracking it is null, unless asked to take the view straight ahead as the scene then draws it.
+        (string Id, Point Point, Rectangle Area, IntPtr Window, float Miss)? FindGaze(bool aheadWithoutTracking = false)
         {
-            if (!tracker.HasPose || gameMode) return null;
+            if ((!tracker.HasPose && !aheadWithoutTracking) || gameMode) return null;
             Quaternion trim = Quaternion.CreateFromYawPitchRoll(0, -view.LevelDeg * DegToRad, view.RollDeg * DegToRad);
             Quaternion drift = Quaternion.CreateFromAxisAngle(Vector3.UnitY, -shared.FollowYaw);
-            Vector3 gaze = Vector3.Transform(-Vector3.UnitZ, drift * tracker.GetPose().Orientation * trim);
+            Vector3 gaze = Vector3.Transform(-Vector3.UnitZ, drift * (tracker.HasPose ? tracker.GetPose().Orientation : Quaternion.Identity) * trim);
             DisplayOptics optics = OpticsFor(view);
 
             (string, Point, Rectangle, IntPtr, float)? best = null;
@@ -1061,6 +1063,40 @@ internal static class LiveApp
                 notice = text;
                 noticeUntil = clock.Elapsed.TotalSeconds + seconds;
             }
+        }
+
+        // A screen added hidden (no room left within reach) would otherwise never be noticed.
+        tellHidden = names =>
+        {
+            if (names.Count == 0) return;
+            Log.Line($"No room within reach; added hidden: {string.Join(", ", names)}.");
+            Notice($"No room in reach, so added hidden: {string.Join(", ", names)}. Show it in Settings.", 8);
+        };
+        tellHidden(hiddenAtStart);
+
+        // Bring it here (Ctrl+Alt+W): a window moves onto the monitor of the screen the wearer is looking at.
+        void BringHere(IntPtr handle, string how)
+        {
+            if (WindowFinder.List().FirstOrDefault(w => w.Handle == handle) is not { } w)
+            {
+                Notice("Click the window you want first, then Ctrl+Alt+W", 3);
+                return;
+            }
+            string name = WindowFinder.FriendlyName(w.Program);
+            if (FindGaze(aheadWithoutTracking: true) is not { } hit)
+            {
+                Notice($"Look at a screen first, then Ctrl+Alt+W brings {name} there", 3);
+                return;
+            }
+            Rectangle to = Screen.FromRectangle(hit.Area).WorkingArea;
+            if (hit.Window == handle || (WindowFinder.Bounds(handle) is { } b && to.Contains(new Point(b.Left + b.Width / 2, b.Top + b.Height / 2))))
+            {
+                if (how == "key") Notice($"{name} is already here", 2);
+                return;
+            }
+            bool moved = WindowFinder.MoveTo(handle, to);
+            Notice(moved ? $"{name} is here now" : $"Windows would not move {name}", 3);
+            Log.Line(moved ? $"Brought a window of {w.Program} to where the wearer looks ({how})." : $"Could not move a window of {w.Program} ({how}).");
         }
 
         void SetDown()
@@ -1272,7 +1308,8 @@ internal static class LiveApp
         placeNewAtGaze = (before, after) =>
         {
             if (!stationary || !tracker.HasPose) return after;
-            List<ScreenSpec> fresh = after.Screens.Where(s => before.Find(s.Id) is null).ToList();
+            // Only screens that are really new: one brought back with its desk keeps the place it had there.
+            List<ScreenSpec> fresh = Desks.Added(before, after);
             if (fresh.Count == 0) return after;
             (float yaw, float pitch) = HeadDirection();
             float apart = 0;
@@ -1316,6 +1353,7 @@ internal static class LiveApp
             Touch();
         }
         settings.FitRequested += FitInView;
+        pictureSizeOf = PictureSize;
         void SwitchMode(bool toStationary)
         {
             if (carried is not null) SetDown();
@@ -1325,7 +1363,8 @@ internal static class LiveApp
             stationary = toStationary;
             Workspace? stored = LayoutStore.Load(stationary);
             workspace = stored ?? new Workspace();
-            layout = LayoutStore.WithScreensFor(workspace.Current.Layout, AutoAddable(), OpticsFor(view));
+            layout = LayoutStore.WithScreensFor(workspace.Current.Layout, AutoAddable(), OpticsFor(view), out IReadOnlyList<string> hidden, sources);
+            tellHidden(hidden);
             if (stationary && stored is null) layout = Presets.FitInView(layout, PictureSize, OpticsFor(view));
             workspace = workspace.WithLayout(layout);
             dirty = true;
@@ -1438,7 +1477,7 @@ internal static class LiveApp
         // Push to talk (Ctrl+Alt+T): one spoken command, handled exactly as the same sentence sent to voice.say.
         using var voice = new Voice();
         listen = () => voice.Listen(new VoiceCommands.Known(layout.Screens, deck.Objects, workspace.Profiles.Select(p => p.Name).ToList(), host.Projects));
-        voice.Status += text => { try { window.BeginInvoke(() => Notice(text, 4)); } catch (InvalidOperationException) { } };
+        voice.Status += text => { try { window.BeginInvoke(() => { Notice(text, 4); settings.SetVoiceResult(null, text); }); } catch (InvalidOperationException) { } };
         voice.Heard += text =>
         {
             try
@@ -1453,6 +1492,7 @@ internal static class LiveApp
                     string reply = ControlApi.Handle(request.ToJsonString(), host, out _) ?? "";
                     string? problem = System.Text.Json.Nodes.JsonNode.Parse(reply)?["error"]?["message"]?.GetValue<string>();
                     Notice(problem is null ? $"\"{text}\"" : $"\"{text}\": {problem}", 4);
+                    settings.SetVoiceResult(text, problem);
                 });
             }
             catch (InvalidOperationException) { }
@@ -1483,6 +1523,9 @@ internal static class LiveApp
                     return;
                 case Keys.M:
                     PointerToGaze();
+                    return;
+                case Keys.W:
+                    BringHere(WindowFinder.Foreground(), "key");
                     return;
                 case Keys.L:
                     // Off, then jump, then follow, then off again.
@@ -1570,23 +1613,83 @@ internal static class LiveApp
         // pointer in it is lost from the real screens. Whenever it strays in, it is carried across to the
         // monitor on the far side, or put back if there is none. That works wherever Windows has placed the
         // glasses among the monitors, including between two of them.
+        // Monitors no visible screen shows are kept free of the pointer the same way: nothing would draw it there.
         bool guideCursor = false;
         Point lastOutside = Cursor.Position;
-        void PlanCursor() => guideCursor = fullScreen && !direct && !gameMode && !args.Contains("--free-cursor") && sources.Count > 0;
+        List<Rectangle> blocked = [], monitorAreas = [];
+        void PlanCursor()
+        {
+            guideCursor = fullScreen && !direct && !gameMode && !args.Contains("--free-cursor") && sources.Count > 0;
+            monitorAreas = sources.Select(d => d.Bounds).ToList();
+            blocked = [area, .. DesktopPath.Unseen(layout, sources.Select(d => (d.Id, d.Bounds)))];
+        }
         planCursor = PlanCursor;
         PlanCursor();
+
+        // The parts of the desktop that shown screens show, as drawn now: monitors first (their picture carries the
+        // pointer itself), then pinned windows wherever they really are.
+        List<(ScreenSpec, Rectangle)> ShownAreas(bool windowsToo)
+        {
+            Snapshot now = shared.Snapshot;
+            var shownAreas = new List<(ScreenSpec, Rectangle)>();
+            foreach (ScreenSpec spec in now.Layout.Screens)
+                if (spec.DisplayName is { } id && now.Sources.FirstOrDefault(d => string.Equals(d.Id, id, StringComparison.OrdinalIgnoreCase)) is { } d) shownAreas.Add((spec, d.Bounds));
+            if (windowsToo)
+                foreach (ScreenSpec spec in now.Layout.Screens)
+                    if (spec.Window is not null && now.Windows.TryGetValue(spec.Source, out IntPtr handle) && !WindowFinder.Minimized(handle) && WindowFinder.Bounds(handle) is { } r) shownAreas.Add((spec, r));
+            return shownAreas;
+        }
+        // The way the scene is drawn from right now: the held picture's direction in stationary mode, else the head.
+        Quaternion ViewNow()
+        {
+            if (shared.HoldHead) return Quaternion.CreateFromYawPitchRoll(shared.HeldYaw * DegToRad, shared.HeldPitch * DegToRad, 0);
+            Quaternion trim = Quaternion.CreateFromYawPitchRoll(0, -view.LevelDeg * DegToRad, view.RollDeg * DegToRad);
+            Quaternion drift = Quaternion.CreateFromAxisAngle(Vector3.UnitY, -shared.FollowYaw);
+            return drift * (tracker.HasPose ? tracker.GetPose().Orientation : Quaternion.Identity) * trim;
+        }
+
+        // Finding the pointer: a ring round it when it starts moving after a rest, an arrow labelled "mouse" while it
+        // moves out of view, and once a session the key that brings it to where the wearer looks.
+        var beacon = new PointerBeacon();
+        Point beaconSeen = Cursor.Position;
+        Mark? mouseMark = null, windowMark = null;
+        double windowMarkUntil = 0;
+        void ShowMarks()
+        {
+            var marks = new List<Mark>(2);
+            if (mouseMark is { } mouse) marks.Add(mouse);
+            if (windowMark is { } opened && clock.Elapsed.TotalSeconds < windowMarkUntil) marks.Add(opened);
+            if (!marks.SequenceEqual(shared.Marks)) shared.Marks = [.. marks];
+        }
+        void BeaconTick(bool slowTick)
+        {
+            Point now = Cursor.Position;
+            bool moved = now != beaconSeen;
+            beaconSeen = now;
+            if (!moved && !slowTick) return;
+            mouseMark = null;
+            if (!gameMode && !blank && !WindowFinder.MouseTakenByProgram())
+            {
+                Vector3? spot = RoomSpot.Of(now, ShownAreas(windowsToo: true), OpticsFor(view));
+                bool inView = spot is { } p && RoomSpot.InView(p, ViewNow(), OpticsFor(view));
+                (bool ring, bool fresh, bool tell) = beacon.Step(clock.Elapsed.TotalSeconds, moved, inView);
+                if (tell) Notice("Lost the mouse? Ctrl+Alt+M brings it to where you look", 6);
+                if (spot is { } at && (ring || fresh)) mouseMark = new Mark(at, fresh ? "mouse" : "", ring);
+            }
+            ShowMarks();
+        }
+
         var cursorTimer = new System.Windows.Forms.Timer(parts) { Interval = 10 };
         int cursorTicks = 0;
         cursorTimer.Tick += (_, _) =>
         {
-            LookTick(++cursorTicks % 5 == 0);
+            bool slowTick = ++cursorTicks % 5 == 0;
+            LookTick(slowTick);
             Point at = Cursor.Position;
-            if (!guideCursor || !area.Contains(at))
-            {
-                lastOutside = at;
-                return;
-            }
-            PlacePointer(DesktopPath.Redirect(at, lastOutside, area, sources.Select(d => d.Bounds).ToList()));
+            if (guideCursor && blocked.Any(b => b.Contains(at)))
+                PlacePointer(DesktopPath.Redirect(at, lastOutside, blocked, monitorAreas));
+            else lastOutside = at;
+            BeaconTick(slowTick);
         };
         cursorTimer.Start();
 
@@ -1654,7 +1757,8 @@ internal static class LiveApp
             // A screen whose virtual monitor is away (game mode, another profile) keeps its place and waits.
             int before = layout.Screens.Count;
             Layout beforeLayout = layout;
-            layout = placeNewAtGaze(beforeLayout, LayoutStore.WithScreensFor(layout, AutoAddable(), OpticsFor(view)));
+            layout = placeNewAtGaze(beforeLayout, LayoutStore.WithScreensFor(layout, AutoAddable(), OpticsFor(view), out IReadOnlyList<string> hidden, sources));
+            tellHidden(hidden);
             if (settled) adding = false;
             Log.Line($"Monitors changed: {sources.Count} to show, {layout.Screens.Count} screens{(layout.Screens.Count > before ? " (new screen added)" : "")}.");
             LineUpDesktops(now);
@@ -1666,10 +1770,45 @@ internal static class LiveApp
         };
         displayTimer.Start();
 
+        // A window that opens where the wearer cannot see it (a screen behind them, a monitor no screen shows) is
+        // announced with its program's name and an arrow to it; or, with Bring new windows on, brought to where they look.
+        void NewWindow(WindowInfo w)
+        {
+            string name = WindowFinder.FriendlyName(w.Program);
+            if (view.BringNewWindows)
+            {
+                BringHere(w.Handle, "new window");
+                return;
+            }
+            if (WindowFinder.Minimized(w.Handle) || WindowFinder.Bounds(w.Handle) is not { } b) return;
+            var middle = new Point(b.Left + b.Width / 2, b.Top + b.Height / 2);
+            if (RoomSpot.Of(middle, ShownAreas(windowsToo: false), OpticsFor(view)) is not { } spot)
+            {
+                Notice($"{name} opened where no screen shows it. Click it, then Ctrl+Alt+W brings it here", 6);
+                Log.Line($"A window of {w.Program} opened on a monitor no screen shows.");
+                return;
+            }
+            if (RoomSpot.InView(spot, ViewNow(), OpticsFor(view))) return;
+            windowMark = new Mark(spot, name, Ring: false);
+            windowMarkUntil = clock.Elapsed.TotalSeconds + 6;
+            ShowMarks();
+            Notice($"{name} opened out of view: follow the arrow, or click it and Ctrl+Alt+W brings it here", 6);
+            Log.Line($"A window of {w.Program} opened out of view.");
+        }
+        // The windows there were at the start, and at the last look, are not new.
+        HashSet<IntPtr> windowsSeen = [.. WindowFinder.List().Select(w => w.Handle)];
+
         // Pinned windows open and close on their own schedule; look for the missing ones now and then.
         var windowTimer = new System.Windows.Forms.Timer(parts) { Interval = 1500 };
         windowTimer.Tick += (_, _) =>
         {
+            List<WindowInfo> all = WindowFinder.List();
+            // Several at once (a program starting up) get one announcement, for the one in front.
+            WindowInfo? opened = all.FirstOrDefault(w => !windowsSeen.Contains(w.Handle) && !pinned.Values.Contains(w.Handle));
+            windowsSeen = [.. all.Select(w => w.Handle)];
+            if (opened is not null && !gameMode && !blank) NewWindow(opened);
+            if (clock.Elapsed.TotalSeconds >= windowMarkUntil && windowMark is not null) { windowMark = null; ShowMarks(); }
+
             IReadOnlyDictionary<string, IntPtr> found = WindowFinder.Resolve(layout, pinned, search: true);
             if (ReferenceEquals(found, pinned)) return;
             pinned = found;
@@ -1876,6 +2015,7 @@ internal static class LiveApp
             scene.SetMenu(shared.HandsShown ? shared.MenuItems : null, shared.MenuHighlight);
 
             scene.Look(head, now.View.Dim, now.Blank, dt, now.View.EasyReading);
+            scene.SetMarks(shared.Marks);
             scene.PointToHiddenScreens(head, optics, now.View.EdgeArrows);
             renderer.Draw(head, optics, now.Stereo ? Camera.DefaultEyeSeparation : 0);
 
@@ -1893,7 +2033,11 @@ internal static class LiveApp
             if (renderer.PreviewStep(startPreview) is { } shot) Interlocked.Exchange(ref shared.Preview, shot)?.Dispose();
         }
 
-        afterPublish = () => workspaceName = workspace.Current.Name;
+        afterPublish = () =>
+        {
+            workspaceName = workspace.Current.Name;
+            PlanCursor(); // a screen shown or hidden changes which monitors the pointer may go on
+        };
 
         Exception? failure = null;
         presenter.Start(DrawFrame, e =>

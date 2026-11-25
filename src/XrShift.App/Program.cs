@@ -48,7 +48,7 @@ internal static class Program
             return sent ? 0 : 2;
         }
         if (args.Contains("--virtual")) return VirtualStatus(Option(args, "--virtual"));
-        if (Option(args, "--settings-shot") is { } settingsShot) return SettingsShot(settingsShot, Option(args, "--page"), args.Contains("--stationary"));
+        if (Option(args, "--settings-shot") is { } settingsShot) return SettingsShot(settingsShot, Option(args, "--page"), args.Contains("--stationary"), args);
 
         string? shot = Option(args, "--shot");
         if (shot is not null) return Shot(shot, args);
@@ -137,7 +137,7 @@ internal static class Program
               --replay-capture IMU --out DIR   run the head tracker over a recording ('xrprobe dump' or 'synth') and save the
                 --seconds S --every MS         frame the wearer sees every MS ms for S seconds, with DIR\poses.csv
                 --predict MS --layout F --deck F   (prediction default 25 ms; layout default one test screen ahead)
-              --settings-shot FILE.png   save a picture of the settings window and exit (--page screen|stationary|follow|tune, --stationary)
+              --settings-shot FILE.png   save a picture of the settings window and exit (--page home|welcome|screen|follow|stationary|hands|games|bots|voice|pcs|settings|advanced|keys, --stationary, --sample-bots)
             Keys, from any program: Ctrl+Alt+0 (or Home, or Space) recentre, Ctrl+Alt+S settings, Ctrl+Alt+Q quit,
             Ctrl+Alt+1 to 4 profiles, Ctrl+Alt+G game mode (glasses show their own desktop),
             Ctrl+Alt+M bring the mouse pointer to where you are looking,
@@ -257,7 +257,8 @@ internal static class Program
         {
             List<DisplayInfo> displays = Displays.List();
             sources = displays.Where(d => !d.IsGlasses).ToList();
-            layout = LayoutStore.WithScreensFor((LayoutStore.Load() ?? new Workspace()).Current.Layout, sources, optics);
+            layout = LayoutStore.WithScreensFor((LayoutStore.Load() ?? new Workspace()).Current.Layout, sources, optics, out IReadOnlyList<string> hidden);
+            if (hidden.Count > 0) Console.WriteLine($"No room within reach; added hidden: {string.Join(", ", hidden)}.");
             glasses = displays.FirstOrDefault(d => d.IsGlasses)?.DeviceName;
         }
         Deck deck = new();
@@ -312,6 +313,18 @@ internal static class Program
         public float Time { get; init; }
         public bool Menu { get; init; }
         public bool Ruler { get; init; }
+        /// <summary>Spots to point the eye to: the mouse pointer, a window that just opened.</summary>
+        public List<MarkEntry> Marks { get; init; } = [];
+    }
+
+    /// <summary>A mark on a screen of the layout: X and Y run 0 to 1 across its picture from the top left.</summary>
+    sealed record MarkEntry
+    {
+        public string Screen { get; init; } = "";
+        public float X { get; init; } = 0.5f;
+        public float Y { get; init; } = 0.5f;
+        public string Label { get; init; } = "";
+        public bool Ring { get; init; }
     }
 
     sealed record ScenarioFile
@@ -468,6 +481,15 @@ internal static class Program
             using var scene = new SpaceScene(renderer, live: false);
             scene.Apply(layout, [], null, optics);
             scene.Apply(deck);
+            var marks = new List<Mark>();
+            foreach (MarkEntry m in frame.Marks)
+            {
+                // Stand-in screens are drawn 1920x1080.
+                if (layout.Find(m.Screen) is not { } on) { Console.WriteLine($"Frame {frame.Name}: no screen '{m.Screen}' for a mark."); return 2; }
+                if (RoomSpot.Of(new System.Drawing.Point((int)(m.X * 1920), (int)(m.Y * 1080)), [(on, new System.Drawing.Rectangle(0, 0, 1920, 1080))], optics) is { } at)
+                    marks.Add(new Mark(at, m.Label, m.Ring));
+            }
+            scene.SetMarks(marks);
             using Bitmap picture = DrawFrame(renderer, scene, HeadAt(frame.Yaw, frame.Pitch, frame.Roll), optics, view, frame,
                 $"{StillStatus(frame.Yaw, frame.Pitch, frame.Roll)}   {layout.Screens.Count} screens   view {view.FovDeg:F1}°");
             string file = frame.Name + ".png";
@@ -542,7 +564,8 @@ internal static class Program
     }
 
     /// <summary>Draws the settings window as it would open, for checking its look without a person at the screen.</summary>
-    static int SettingsShot(string path, string? page, bool stationary)
+    /// <param name="page">home, welcome, screen, follow, stationary, hands, games, bots, voice, pcs, settings, advanced or keys.</param>
+    static int SettingsShot(string path, string? page, bool stationary, string[] args)
     {
         ViewSettings view = ViewSettings.Load();
         DisplayOptics optics = DisplayOptics.OnePro with { HorizontalFovDeg = view.FovDeg };
@@ -554,12 +577,43 @@ internal static class Program
         settings.SetProfiles(workspace.Profiles.Select(p => p.Name).ToList(), workspace.Active);
         Rectangle home = (sources.FirstOrDefault(d => d.Primary) ?? sources[0]).Bounds;
         settings.Location = new Point(home.Left + 40, home.Top + 40);
+        // Claude Code's settings are read from the settings folder's copy, never the real one (see ClaudeSettingsPath).
+        settings.ClaudeSettingsPath = Path.Combine(TrackingConfig.Folder, "claude-settings.json");
+        if (args.Contains("--sample-bots"))
+        {
+            // A few made-up bots, to see the Bots page and the status with some in it.
+            Deck sample = new Deck()
+                .Report("a", "UserPromptSubmit", "invoice-export", 1, note: "Fix the rounding in the monthly export")
+                .Report("b", "UserPromptSubmit", "site-redesign", 2)
+                .Report("b", "Notification", note: "May I run the database migration?")
+                .Report("c", "Stop", "notes", null, "DESK-PC", DateTime.UtcNow, "Summarised the meeting");
+            settings.BotsSource = () => sample;
+            settings.SetLinks(apiRunning: true, netRunning: false);
+        }
         settings.Show();
         settings.SetGlassesMode(stationary);
-        settings.ShowPageNamed(page ?? "screen");
+        string name = page ?? "screen";
+        if (name != "welcome") settings.HideGuide();
+        settings.ShowPageNamed(name);
         Application.DoEvents();
         using var picture = new Bitmap(settings.Width, settings.Height);
         settings.DrawToBitmap(picture, new Rectangle(Point.Empty, settings.Size));
+        if (name == "keys")
+        {
+            // The key reference is a box of its own: drawn instead of the window.
+            using Form keys = settings.KeysForm();
+            keys.StartPosition = FormStartPosition.Manual;
+            keys.Location = settings.Location;
+            keys.Show(settings);
+            Application.DoEvents();
+            using var box = new Bitmap(keys.Width, keys.Height);
+            keys.DrawToBitmap(box, new Rectangle(Point.Empty, keys.Size));
+            keys.Close();
+            settings.Close();
+            SavePng(box, path);
+            Console.WriteLine($"Keys {box.Width}x{box.Height} -> {path}");
+            return 0;
+        }
         settings.Close();
         SavePng(picture, path);
         Console.WriteLine($"Settings window {picture.Width}x{picture.Height} -> {path}");

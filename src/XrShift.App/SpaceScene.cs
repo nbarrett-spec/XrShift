@@ -74,9 +74,13 @@ internal sealed class SpaceScene : IDisposable
     readonly Dictionary<string, System.Drawing.Size> _captureSizes = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, Rectangle> _captureBounds = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, long> _refused = new(StringComparer.OrdinalIgnoreCase); // source -> when it was last refused
-    readonly SceneItem _ruler, _crosshair, _status, _notice, _hands, _menu, _edges;
+    readonly SceneItem _ruler, _crosshair, _status, _notice, _hands, _menu, _edges, _ring;
     /// <summary>The colour of the edge round each screen, stretched over its frame.</summary>
     readonly Bitmap _screenEdge;
+    IReadOnlyList<Mark> _marks = [];
+    System.Numerics.Vector3? _ringAt;
+    /// <summary>The label LiveApp gives the mouse pointer's mark; its arrow is drawn as the mouse kind.</summary>
+    const string MouseLabel = "mouse";
     string _edgesShown = "";
     DisplayOptics _edgesOptics = DisplayOptics.OnePro;
     string _menuShown = "";
@@ -143,6 +147,11 @@ internal sealed class SpaceScene : IDisposable
         using (Bitmap edgesPicture = Pictures.Edges([]))
             _edges = renderer.Add(EdgesMesh(DisplayOptics.OnePro), edgesPicture, headLocked: true);
         _edges.Visible = false;
+
+        // The ring round the mouse pointer: in the room, where the pointer is; moved there by SetMarks.
+        using (Bitmap ringPicture = Pictures.Ring())
+            _ring = renderer.Add(PanelMesh.Build(new Panel { Width = 0.2f, Height = 0.2f }), ringPicture, distance: 2f);
+        _ring.Visible = false;
 
         // The hand quick menu, in the middle of the view.
         using (Bitmap menuPicture = Pictures.Menu([], -1))
@@ -271,14 +280,6 @@ internal sealed class SpaceScene : IDisposable
 
     /// <summary>Whether each floating screen gets a thin coloured edge, so a white page on a white wall still has one.</summary>
     public bool ScreenEdges { get; set; } = true;
-
-    IReadOnlyList<(float YawDeg, float PitchDeg, string Name, HintKind Kind)> _roomHints = [];
-
-    /// <summary>
-    /// More things for the edge arrows to point at when out of sight, by their direction in the room: the mouse
-    /// pointer, a window that just opened. Drawing thread only.
-    /// </summary>
-    public void SetRoomHints(IReadOnlyList<(float YawDeg, float PitchDeg, string Name, HintKind Kind)> hints) => _roomHints = hints;
 
     /// <summary>
     /// Makes the scene match the layout: adds, moves, resizes and removes screens, and starts or
@@ -613,8 +614,30 @@ internal sealed class SpaceScene : IDisposable
     }
 
     /// <summary>
-    /// Points the edge arrows at every shown room screen that is out of sight from this head direction. Drawing
-    /// thread only; the picture is only redrawn when an arrow moves by more than a few degrees.
+    /// Spots to point the eye to (the mouse pointer, a window that just opened): a ring round the one that asks for
+    /// it, and an edge arrow to each one with a label while it is out of view. Drawing thread only.
+    /// </summary>
+    public void SetMarks(IReadOnlyList<Mark> marks)
+    {
+        _marks = marks;
+        System.Numerics.Vector3? ringAt = null;
+        foreach (Mark m in marks) if (m.Ring) { ringAt = m.Point; break; }
+        if (ringAt is not { } p || p == _ringAt) { _ringAt = ringAt; return; }
+        _ringAt = p;
+        // Facing the wearer, a little in front of the screen the pointer is on, about 6 degrees across.
+        float length = p.Length(), distance = MathF.Max(length - 0.03f, 0.2f), size = 2f * distance * MathF.Tan(3f * MathF.PI / 180f);
+        var panel = new Panel
+        {
+            YawDeg = MathF.Atan2(-p.X, -p.Z) * 180f / MathF.PI,
+            PitchDeg = MathF.Asin(Math.Clamp(p.Y / MathF.Max(length, 1e-4f), -1f, 1f)) * 180f / MathF.PI,
+            Distance = distance, Width = size, Height = size,
+        };
+        _renderer.SetMesh(_ring, PanelMesh.Build(panel), distance);
+    }
+
+    /// <summary>
+    /// Points the edge arrows at every shown room screen that is out of sight from this head direction, and at the
+    /// labelled marks. Drawing thread only; the picture is only redrawn when an arrow moves by more than a few degrees.
     /// </summary>
     public void PointToHiddenScreens(System.Numerics.Quaternion head, DisplayOptics optics, bool show)
     {
@@ -622,28 +645,30 @@ internal sealed class SpaceScene : IDisposable
         var avoid = new List<RectangleF>();
         RectangleF? cardRect = null;
         var toView = System.Numerics.Quaternion.Conjugate(head);
+        _ring.Visible = _ringAt is not null && !_blank;
         if (!_blank)
         {
             float halfX = optics.HorizontalFovDeg / 2f, halfY = optics.VerticalFovDeg / 2f;
-            void Add(Panel panel, string name, HintKind kind)
+            void Add(System.Numerics.Vector3 centre, float halfW, string name, HintKind kind)
             {
-                System.Numerics.Vector3 v = System.Numerics.Vector3.Transform(panel.Centre, toView);
-                float across = MathF.Atan2(v.X, -v.Z) * 180f / MathF.PI, up = MathF.Atan2(v.Y, MathF.Sqrt(v.X * v.X + v.Z * v.Z)) * 180f / MathF.PI;
-                float halfW = panel.AngularWidthDeg / 2f;
+                (float across, float up) = RoomSpot.Angles(centre, head);
                 if (MathF.Abs(across) < halfX + halfW * 0.5f && MathF.Abs(up) < halfY) return; // at least half in view
                 hints.Add(new Hint(MathF.Atan2(up, across) * 180f / MathF.PI, name, kind));
             }
             foreach (LiveScreen screen in _screens.Values)
             {
-                if (show && screen.Shown && !screen.Spec.FollowsMe && screen.Panel is { } panel) Add(panel, screen.Spec.Name, HintKind.Screen);
+                if (show && screen.Shown && !screen.Spec.FollowsMe && screen.Panel is { } panel) Add(panel.Centre, panel.AngularWidthDeg / 2f, screen.Spec.Name, HintKind.Screen);
             }
-            // A bot waiting for the wearer always gets an arrow, whatever the setting for screens says.
+            // A bot waiting for the wearer always gets an arrow, whatever the setting for screens says; so do the marks.
             foreach (LiveObject live in _objects.Values)
             {
-                if (live.Object.State == BotState.NeedsYou) Add(live.Panel, $"{live.Object.Label} needs you", HintKind.NeedsYou);
+                if (live.Object.State == BotState.NeedsYou) Add(live.Panel.Centre, live.Panel.AngularWidthDeg / 2f, $"{live.Object.Label} needs you", HintKind.NeedsYou);
             }
-            foreach ((float yaw, float pitch, string name, HintKind kind) in _roomHints)
-                Add(new Panel { YawDeg = yaw, PitchDeg = pitch, Distance = 1, Width = 0.01f, Height = 0.01f }, name, kind);
+            // The mouse pointer's mark is labelled "mouse"; any other labelled mark is a window that just opened.
+            foreach (Mark m in _marks)
+            {
+                if (m.Label.Length > 0) Add(m.Point, 0, m.Label, m.Label == MouseLabel ? HintKind.Mouse : HintKind.Opened);
+            }
 
             // The card of the bot looked at, and the bots themselves, in display pixels: arrows and labels keep off them.
             float focal = 960f / MathF.Tan(halfX * MathF.PI / 180f);
