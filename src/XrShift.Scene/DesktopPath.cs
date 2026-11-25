@@ -47,6 +47,26 @@ public static class DesktopPath
         return new Point(Math.Clamp(x, t.Left, t.Right - 1), fromTop ? t.Top + 1 : t.Bottom - 2);
     }
 
+    /// <summary>
+    /// The same for several areas the pointer must stay out of: the glasses' own and every monitor no visible screen
+    /// shows, where nothing would draw the pointer. A pointer in any of them is carried across to the nearest monitor
+    /// beyond that is not blocked, or stopped where it was if there is none. A pointer in no blocked area stays put.
+    /// </summary>
+    /// <param name="lastOutside">Where it last was outside every blocked area.</param>
+    /// <param name="monitors">Every monitor's area; the blocked ones among them are left out.</param>
+    public static Point Redirect(Point inside, Point lastOutside, IReadOnlyList<Rectangle> blocked, IReadOnlyList<Rectangle> monitors)
+    {
+        foreach (Rectangle area in blocked)
+            if (area.Contains(inside))
+                return Redirect(inside, lastOutside, area, monitors.Where(m => !blocked.Contains(m)).ToList());
+        return inside;
+    }
+
+    /// <summary>The areas of the monitors that no visible screen in <paramref name="layout"/> shows: hidden, or not in it at all.</summary>
+    public static List<Rectangle> Unseen(Layout layout, IEnumerable<(string Id, Rectangle Bounds)> monitors) =>
+        monitors.Where(m => !layout.Screens.Any(s => s.Visible && string.Equals(s.DisplayName, m.Id, StringComparison.OrdinalIgnoreCase)))
+            .Select(m => m.Bounds).ToList();
+
     static Rectangle? Nearest(IEnumerable<Rectangle> candidates, Func<Rectangle, int> gap)
     {
         Rectangle? best = null;

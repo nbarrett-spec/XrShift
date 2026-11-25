@@ -168,49 +168,33 @@ internal static class LayoutStore
     }
 
     /// <summary>
-    /// Makes sure every connected monitor (other than the glasses) has a screen. New ones are placed
-    /// beside what is already there. Returns the same object when nothing needed adding.
+    /// Makes sure every connected monitor (other than the glasses) has a screen, in the arrangement kept for the desk
+    /// the PC is at. New ones are placed beside what is already there, within reach. Returns the same object when
+    /// nothing needed adding.
     /// </summary>
-    public static Layout WithScreensFor(Layout layout, IEnumerable<DisplayInfo> sources, DisplayOptics optics)
+    public static Layout WithScreensFor(Layout layout, IEnumerable<DisplayInfo> sources, DisplayOptics optics) =>
+        WithScreensFor(layout, sources, optics, out _);
+
+    /// <param name="hidden">Names of new screens added hidden because there was no room in reach: tell the wearer.</param>
+    /// <param name="present">
+    /// Every monitor connected now, to tell which desk this is, when <paramref name="sources"/> is only some of them
+    /// (stationary mode). Without it a list holding no real monitor leaves the desk as it is.
+    /// </param>
+    public static Layout WithScreensFor(Layout layout, IEnumerable<DisplayInfo> sources, DisplayOptics optics,
+        out IReadOnlyList<string> hidden, IEnumerable<DisplayInfo>? present = null)
     {
-        layout = Reconnect(layout, sources.ToList());
+        List<DisplayInfo> addable = sources.ToList();
         // Screens of the virtual display driver are dropped once the driver is gone: nothing can bring them back.
         if (!VirtualMonitors.Installed)
         {
             List<ScreenSpec> stale = layout.Screens.Where(s => s.DisplayName is { } id && id.Contains("#MTT1337#", StringComparison.OrdinalIgnoreCase)).ToList();
             foreach (ScreenSpec s in stale) layout = layout.Remove(s.Id);
         }
-        foreach (DisplayInfo display in sources.OrderByDescending(d => d.Primary))
-        {
-            if (layout.Shows(display.Id)) continue;
-            // Friendly names: people know "Laptop screen", not the panel's model number.
-            string name = display.Primary && !display.IsGlasses ? "Laptop screen"
-                : VirtualMonitors.IsVirtual(display) ? $"Extra monitor {layout.Screens.Count(s => VirtualMonitors.IsVirtualId(s.DisplayName)) + 1}"
-                : display.MonitorNames.Length > 0 ? display.MonitorNames[0] : $"Monitor {layout.Screens.Count + 1}";
-            layout = layout.Add(layout.PlaceNew(name, ScreenSpec.DisplaySource(display.Id), display.Bounds.Width, display.Bounds.Height, optics));
-        }
+        (layout, hidden) = Desks.Fit(layout, (present ?? addable).Where(d => !d.IsGlasses).Select(Facts).ToList(),
+            addable.Select(Facts).ToList(), optics, VirtualMonitors.IsVirtualId);
         return layout;
     }
 
-    /// <summary>
-    /// A monitor's Windows path changes when it moves to another graphics card (the laptop panel does with
-    /// Advanced Optimus). A screen whose monitor is missing is pointed at the connected monitor with the same
-    /// hardware id, so it keeps its place instead of showing "not connected" beside a new copy.
-    /// </summary>
-    static Layout Reconnect(Layout layout, List<DisplayInfo> sources)
-    {
-        static string? Hardware(string id)
-        {
-            string[] parts = id.Split('#');
-            return parts.Length > 2 ? parts[1] : null;
-        }
-        foreach (ScreenSpec spec in layout.Screens.ToList())
-        {
-            if (spec.DisplayName is not { } id || sources.Any(d => string.Equals(d.Id, id, StringComparison.OrdinalIgnoreCase))) continue;
-            if (Hardware(id) is not { } hardware) continue;
-            DisplayInfo? same = sources.FirstOrDefault(d => string.Equals(Hardware(d.Id), hardware, StringComparison.OrdinalIgnoreCase) && !layout.Shows(d.Id));
-            if (same is not null) layout = layout.With(spec with { Source = ScreenSpec.DisplaySource(same.Id) });
-        }
-        return layout;
-    }
+    static MonitorFacts Facts(DisplayInfo d) =>
+        new(d.Id, d.MonitorNames.FirstOrDefault(), VirtualMonitors.IsVirtual(d), d.Primary, d.Bounds.Width, d.Bounds.Height);
 }
