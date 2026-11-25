@@ -38,8 +38,8 @@ internal sealed record BotNetwork(string Secret, int Port, IReadOnlyList<string>
         var p = (JsonObject)report["params"]!;
         p.Remove("pid"); // this PC's process numbers mean nothing on another
         p["pc"] = Environment.MachineName;
-        p["secret"] = Secret;
-        byte[] line = Encoding.UTF8.GetBytes(report.ToJsonString() + "\n");
+        // Sealed with a key made from the secret: the network sees neither the secret nor what the bot was asked.
+        byte[] line = Encoding.UTF8.GetBytes(XrShift.Scene.BotReportGate.Seal(report.ToJsonString(), Secret, DateTimeOffset.UtcNow) + "\n");
 
         // A peer that did not answer is left alone for a minute, so hooks do not all pay for a PC that is off.
         string downFile = Path.Combine(Path.GetTempPath(), "xrshift-peers-down.txt");
@@ -76,21 +76,22 @@ internal sealed record BotNetwork(string Secret, int Port, IReadOnlyList<string>
 
 /// <summary>
 /// Takes bot reports from the wearer's other PCs. Deliberately narrow: only from private network addresses, only
-/// with the shared secret, only the one request <c>bot.report</c>, one short line per connection. Nothing on this
+/// sealed with the shared secret and not seen before, only the one request <c>bot.report</c>, one short line per connection. Nothing on this
 /// port can list the scene, move screens, type into a session or start one.
 /// </summary>
 internal sealed class BotNetListener : IDisposable
 {
-    const int MaxLineBytes = 4096;
+    // The sealed line is about a third longer than the request inside it, so this still takes a 4 KB request.
+    const int MaxLineBytes = 8192;
 
     readonly TcpListener _listener;
-    readonly string _secret;
+    readonly XrShift.Scene.BotReportGate _gate;
     readonly Action<string> _report;
 
-    /// <param name="report">Given each accepted <c>bot.report</c> request line, secret removed. Called from a network thread.</param>
+    /// <param name="report">Given each accepted <c>bot.report</c> request line, opened. Called from a network thread.</param>
     public BotNetListener(BotNetwork network, Action<string> report)
     {
-        _secret = network.Secret;
+        _gate = new XrShift.Scene.BotReportGate(network.Secret);
         _report = report;
         _listener = new TcpListener(IPAddress.Any, network.Port);
         _listener.Start();
@@ -130,7 +131,7 @@ internal sealed class BotNetListener : IDisposable
                 }
                 int end = Array.IndexOf(buffer, (byte)'\n', 0, filled);
                 if (end < 0) return; // too long, or cut short
-                if (XrShift.Scene.BotReportGate.Accepted(Encoding.UTF8.GetString(buffer, 0, end), _secret) is { } line) _report(line);
+                if (_gate.Accepted(Encoding.UTF8.GetString(buffer, 0, end), DateTimeOffset.UtcNow) is { } line) _report(line);
             }
             catch (Exception e) when (e is IOException or SocketException or JsonException or InvalidOperationException) { }
         }
