@@ -22,6 +22,45 @@ internal sealed class SpaceScene : IDisposable
         public Panel? Panel;
         /// <summary>Whether the layout says this screen is drawn (it is visible and has something to show).</summary>
         public bool Shown;
+        /// <summary>The thin coloured edge just outside the screen, and the screen shape it was made for.</summary>
+        public SceneItem? Edge;
+        public Panel? EdgeFor;
+    }
+
+    /// <summary>How thick the edge round a screen is, in display pixels: thick enough not to shimmer, thin enough not to frame.</summary>
+    const float EdgePixels = 4;
+
+    /// <summary>
+    /// A band just outside a screen, following its curve. It is a shape of its own around the screen, so the screen's
+    /// own pixels are drawn exactly as before.
+    /// </summary>
+    static XrShift.Scene.Mesh EdgeMesh(Panel p)
+    {
+        float m = p.Distance * EdgePixels / Focal;
+        float ex = m / p.Width, ey = m / p.Height;
+        int columns = p.CurveDeg < 0.06f ? 1 : Math.Clamp((int)MathF.Ceiling(p.CurveDeg / 2f), 2, 360);
+        var vertices = new List<MeshVertex>();
+        var indices = new List<ushort>();
+        void Band(float s0, float s1, float t0, float t1, int cols)
+        {
+            int first = vertices.Count;
+            for (int c = 0; c <= cols; c++)
+            {
+                float s = s0 + (s1 - s0) * c / cols;
+                vertices.Add(new MeshVertex(p.WorldPoint(s, t1), new System.Numerics.Vector2(0.5f, 0.5f)));
+                vertices.Add(new MeshVertex(p.WorldPoint(s, t0), new System.Numerics.Vector2(0.5f, 0.5f)));
+            }
+            for (int c = 0; c < cols; c++)
+            {
+                int tl = first + c * 2;
+                indices.AddRange([(ushort)tl, (ushort)(tl + 1), (ushort)(tl + 2), (ushort)(tl + 2), (ushort)(tl + 1), (ushort)(tl + 3)]);
+            }
+        }
+        Band(-0.5f - ex, 0.5f + ex, 0.5f, 0.5f + ey, columns);
+        Band(-0.5f - ex, 0.5f + ex, -0.5f - ey, -0.5f, columns);
+        Band(-0.5f - ex, -0.5f, -0.5f, 0.5f, 1);
+        Band(0.5f, 0.5f + ex, -0.5f, 0.5f, 1);
+        return new XrShift.Scene.Mesh([.. vertices], [.. indices]);
     }
 
     static readonly long RetryTicks = System.Diagnostics.Stopwatch.Frequency; // one second
@@ -35,10 +74,15 @@ internal sealed class SpaceScene : IDisposable
     readonly Dictionary<string, System.Drawing.Size> _captureSizes = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, Rectangle> _captureBounds = new(StringComparer.OrdinalIgnoreCase);
     readonly Dictionary<string, long> _refused = new(StringComparer.OrdinalIgnoreCase); // source -> when it was last refused
-    readonly SceneItem _ruler, _crosshair, _status, _hands, _menu, _edges, _ring;
+    readonly SceneItem _ruler, _crosshair, _status, _notice, _hands, _menu, _edges, _ring;
+    /// <summary>The colour of the edge round each screen, stretched over its frame.</summary>
+    readonly Bitmap _screenEdge;
     IReadOnlyList<Mark> _marks = [];
     System.Numerics.Vector3? _ringAt;
+    /// <summary>The label LiveApp gives the mouse pointer's mark; its arrow is drawn as the mouse kind.</summary>
+    const string MouseLabel = "mouse";
     string _edgesShown = "";
+    DisplayOptics _edgesOptics = DisplayOptics.OnePro;
     string _menuShown = "";
     HandFrame? _handsShown;
     bool _handsPinch;
@@ -91,15 +135,17 @@ internal sealed class SpaceScene : IDisposable
 
         using (Bitmap cross = Pictures.Crosshair())
             _crosshair = renderer.Add(PanelMesh.HeadLocked(0, 0, 1.2f, 1.2f), cross, headLocked: true);
+        _screenEdge = Pictures.Solid(Style.ScreenEdge);
 
         // Gesture mode: a small view of the hands, low on the right.
         using (Bitmap handsPicture = Pictures.Hands([], false, ""))
             _hands = renderer.Add(PanelMesh.HeadLocked(17f, -7.5f, 12f, 9f), handsPicture, headLocked: true);
         _hands.Visible = false;
 
-        // Arrows along the edges of the view pointing to screens that are out of sight, with their names.
+        // Arrows along the edges of the view pointing to screens that are out of sight, with their names. The picture
+        // covers the whole view, so display pixels map straight onto it.
         using (Bitmap edgesPicture = Pictures.Edges([]))
-            _edges = renderer.Add(PanelMesh.HeadLocked(0, 0, 44f, 44f * Pictures.EdgesHeight / Pictures.EdgesWidth), edgesPicture, headLocked: true);
+            _edges = renderer.Add(EdgesMesh(DisplayOptics.OnePro), edgesPicture, headLocked: true);
         _edges.Visible = false;
 
         // The ring round the mouse pointer: in the room, where the pointer is; moved there by SetMarks.
@@ -112,11 +158,58 @@ internal sealed class SpaceScene : IDisposable
             _menu = renderer.Add(PanelMesh.HeadLocked(0, 2f, 36f, 36f * Pictures.MenuHeight / Pictures.MenuWidth), menuPicture, headLocked: true);
         _menu.Visible = false;
 
-        const float statusDegreesWide = 26f;
+        // The status strip and, under it, the notice area: both at the top of the view, clear of the bot row low down
+        // and of the bottom edge of a screen straight ahead.
         using (Bitmap status = Pictures.Status(""))
-            _status = renderer.Add(
-                PanelMesh.HeadLocked(0, -12.3f, statusDegreesWide, statusDegreesWide * Pictures.StatusHeight / Pictures.StatusWidth),
-                status, headLocked: true);
+            _status = renderer.Add(Overlay(0, 0, 1, 1), status, headLocked: true);
+        using (Bitmap notice = Pictures.Notice("", NoticeLevel.Info))
+            _notice = renderer.Add(Overlay(0, 0, 1, 1), notice, headLocked: true);
+        _notice.Visible = false;
+        PlaceOverlays();
+    }
+
+    /// <summary>From the middle of the view to its side edge, in display pixels, measured the way the projection does: by tangent.</summary>
+    static readonly float Focal = DisplayOptics.OnePro.Width / 2f / MathF.Tan(DisplayOptics.OnePro.HorizontalFovDeg / 2f * MathF.PI / 180f);
+
+    /// <summary>
+    /// A head-locked rectangle given in display pixels from the middle of the view (y up), so a picture made at one
+    /// picture pixel per display pixel is shown at exactly that size.
+    /// </summary>
+    static XrShift.Scene.Mesh Overlay(float x, float y, float w, float h)
+    {
+        static float Deg(float px) => MathF.Atan(px / Focal) * 180f / MathF.PI;
+        float left = Deg(x - w / 2), right = Deg(x + w / 2), bottom = Deg(y - h / 2), top = Deg(y + h / 2);
+        return PanelMesh.HeadLocked((left + right) / 2, (bottom + top) / 2, right - left, top - bottom);
+    }
+
+    static XrShift.Scene.Mesh EdgesMesh(DisplayOptics optics) => PanelMesh.HeadLocked(0, 0, optics.HorizontalFovDeg, optics.VerticalFovDeg);
+
+    /// <summary>Puts the status strip, notice area and crosshair in place, larger in 3D (see <see cref="Style.StereoScale"/>).</summary>
+    void PlaceOverlays()
+    {
+        float s = _stereo ? Style.StereoScale : 1f, top = 540 - 18; // the top of the view, less a margin the optics blur
+        _renderer.SetMesh(_status, Overlay(0, top - Pictures.StatusHeight * s / 2, Pictures.StatusWidth * s, Pictures.StatusHeight * s), 0);
+        top -= Pictures.StatusHeight * s + 4;
+        _renderer.SetMesh(_notice, Overlay(0, top - Pictures.NoticeHeight * s / 2, Pictures.NoticeWidth * s, Pictures.NoticeHeight * s), 0);
+        _renderer.SetMesh(_crosshair, Overlay(0, 0, Pictures.CrosshairSize * s, Pictures.CrosshairSize * s), 0);
+    }
+
+    bool _stereo;
+
+    /// <summary>
+    /// Whether the frames are 3D side by side: overlays and the bot card are drawn larger, and edge arrows keep further
+    /// in, since each eye's half is shifted sideways and cut at the middle.
+    /// </summary>
+    public bool Stereo
+    {
+        get => _stereo;
+        set
+        {
+            if (value == _stereo) return;
+            _stereo = value;
+            PlaceOverlays();
+            _cardShown = "";
+        }
     }
 
     public bool OverlayVisible
@@ -162,6 +255,31 @@ internal sealed class SpaceScene : IDisposable
         using Bitmap picture = Pictures.Status(text);
         _renderer.SetPicture(_status, picture);
     }
+
+    string _noticeText = "";
+    NoticeLevel _noticeLevel;
+
+    /// <summary>Shows a notice in the notice area under the status strip, or hides it (empty text). Drawing thread only.</summary>
+    public void SetNotice(string text, NoticeLevel level)
+    {
+        _notice.Visible = text.Length > 0;
+        if (text == _noticeText && level == _noticeLevel) return;
+        (_noticeText, _noticeLevel) = (text, level);
+        using Bitmap picture = Pictures.Notice(text, level);
+        _renderer.SetPicture(_notice, picture);
+    }
+
+    /// <summary>
+    /// How loud a notice should be, guessed from its words until callers say so themselves: one that ends in "!" or is
+    /// about something the wearer has to act on gets the needs-you look.
+    /// </summary>
+    public static NoticeLevel GuessNoticeLevel(string text) =>
+        text.EndsWith('!') || ((string[])["needs you", "Lost the mouse", "do not report their mode", "added hidden"])
+            .Any(words => text.Contains(words, StringComparison.OrdinalIgnoreCase))
+            ? NoticeLevel.NeedsYou : NoticeLevel.Info;
+
+    /// <summary>Whether each floating screen gets a thin coloured edge, so a white page on a white wall still has one.</summary>
+    public bool ScreenEdges { get; set; } = true;
 
     /// <summary>
     /// Makes the scene match the layout: adds, moves, resizes and removes screens, and starts or
@@ -251,11 +369,13 @@ internal sealed class SpaceScene : IDisposable
         }
 
         // Screens.
-        foreach (string gone in _screens.Keys.Where(k => layout.Find(k) is null).ToList())
+        void Drop(string id)
         {
-            _renderer.Remove(_screens[gone].Item);
-            _screens.Remove(gone);
+            _renderer.Remove(_screens[id].Item);
+            if (_screens[id].Edge is { } edge) _renderer.Remove(edge);
+            _screens.Remove(id);
         }
+        foreach (string gone in _screens.Keys.Where(k => layout.Find(k) is null).ToList()) Drop(gone);
 
         foreach (ScreenSpec spec in layout.Screens)
         {
@@ -305,8 +425,7 @@ internal sealed class SpaceScene : IDisposable
             if (_screens.TryGetValue(spec.Id, out LiveScreen? before) && before.Item.HeadLocked != spec.FollowsMe)
             {
                 // Following you or staying in the room is decided when the screen is made: make it again.
-                _renderer.Remove(before.Item);
-                _screens.Remove(spec.Id);
+                Drop(spec.Id);
             }
             if (!_screens.TryGetValue(spec.Id, out LiveScreen? screen))
             {
@@ -331,6 +450,11 @@ internal sealed class SpaceScene : IDisposable
                 screen.Panel = panel;
             }
 
+            // Just behind the screen, so it is drawn first and never over it.
+            if (screen.Edge is null) screen.Edge = _renderer.Add(EdgeMesh(panel), _screenEdge, spec.FollowsMe, panel.Distance + 0.01f);
+            else if (screen.EdgeFor != panel) _renderer.SetMesh(screen.Edge, EdgeMesh(panel), panel.Distance + 0.01f);
+            screen.EdgeFor = panel;
+
             if (feed is null && screen.Still != still)
             {
                 string[] parts = still.Split('|');
@@ -342,6 +466,7 @@ internal sealed class SpaceScene : IDisposable
             screen.Still = feed is null ? still : "";
             screen.Shown = visible;
             screen.Item.Visible = visible && !_blank;
+            screen.Edge.Visible = screen.Item.Visible && ScreenEdges;
         }
     }
 
@@ -356,7 +481,16 @@ internal sealed class SpaceScene : IDisposable
 
     readonly Dictionary<string, LiveObject> _objects = [];
     SceneItem? _card;
+    Panel? _cardPanel;
     string _cardShown = "";
+
+    /// <summary>
+    /// How far above its place in the room the bot row is drawn. The row's place is low (see <see cref="Deck.RowPitchDeg"/>):
+    /// lifted this much, names stay in view when looking only a little down, and the row still stays out of sight straight ahead.
+    /// </summary>
+    const float RowLiftDeg = 1.5f;
+
+    static Panel PanelOf(SceneObject o) => o.Placed ? o.ToPanel() : o.ToPanel() with { PitchDeg = o.PitchDeg + RowLiftDeg };
 
     /// <summary>Shows the card of the bot being looked at, just above it, and hides it when the wearer looks away.</summary>
     void ShowCard(System.Numerics.Vector3 gaze, bool blank)
@@ -368,8 +502,12 @@ internal sealed class SpaceScene : IDisposable
         string key = $"{o.Id}|{o.Label}|{o.State}|{o.Offline}|{o.Pc}|{o.Note}|{o.YawDeg}|{o.PitchDeg}|{o.Distance}";
         if (key == _cardShown && _card is not null) return;
         _cardShown = key;
-        float distance = MathF.Max(o.Distance - 0.1f, 0.2f), width = 2f * distance * MathF.Tan(9f * MathF.PI / 180f);
-        var panel = new Panel { YawDeg = o.YawDeg, PitchDeg = o.PitchDeg + 9.5f, Distance = distance, Width = width, Height = width * Pictures.CardHeight / Pictures.CardWidth };
+        // Just above the bot, its lower edge clear of the mark; in 3D larger, as the overlays are, and raised by as much.
+        float grow = _stereo ? 1.15f : 1f, half = 9f * grow;
+        float distance = MathF.Max(o.Distance - 0.1f, 0.2f), width = 2f * distance * MathF.Tan(half * MathF.PI / 180f);
+        float cardPitch = (_objects.TryGetValue(o.Id, out LiveObject? live) ? live.Panel.PitchDeg : o.PitchDeg) + 3.5f + 3.4f * grow;
+        var panel = new Panel { YawDeg = o.YawDeg, PitchDeg = cardPitch, Distance = distance, Width = width, Height = width * Pictures.CardHeight / Pictures.CardWidth };
+        _cardPanel = panel;
         using Bitmap picture = Pictures.Card(o);
         if (_card is null) _card = _renderer.Add(PanelMesh.Build(panel), picture, distance: distance);
         else
@@ -393,7 +531,7 @@ internal sealed class SpaceScene : IDisposable
         }
         foreach (SceneObject o in deck.Objects)
         {
-            Panel panel = o.ToPanel();
+            Panel panel = PanelOf(o);
             if (!_objects.TryGetValue(o.Id, out LiveObject? live))
             {
                 using Bitmap picture = Pictures.Object(o);
@@ -414,18 +552,20 @@ internal sealed class SpaceScene : IDisposable
         }
     }
 
-    /// <summary>Once per frame: a working bot pulses slowly, one that needs the wearer pulses fast, an idle one is dim.</summary>
+    /// <summary>
+    /// Once per frame: a working bot pulses slowly and gently, one that needs the wearer more strongly; nothing else
+    /// moves. Never dimmer than 0.7, so names stay readable at the low point.
+    /// </summary>
     void Pulse(float seconds, bool blank, float? clock)
     {
         _time = clock ?? _time + seconds;
         foreach (LiveObject live in _objects.Values)
         {
             live.Item.Visible = !blank;
-            live.Item.Tint = live.Object.Offline ? 0.6f : live.Object.State switch
+            live.Item.Tint = live.Object.Offline ? 1f : live.Object.State switch
             {
-                BotState.Working => 0.8f + 0.2f * MathF.Sin(_time * MathF.Tau / 2.4f),
-                BotState.NeedsYou => 0.65f + 0.35f * MathF.Sin(_time * MathF.Tau / 0.7f),
-                BotState.Idle => 0.6f,
+                BotState.Working => 0.92f + 0.08f * MathF.Sin(_time * MathF.Tau / 2.4f),
+                BotState.NeedsYou => 0.85f + 0.15f * MathF.Sin(_time * MathF.Tau / 1.2f),
                 _ => 1f,
             };
         }
@@ -465,6 +605,11 @@ internal sealed class SpaceScene : IDisposable
             screen.Item.Visible = screen.Shown && !blank;
             float target = (!dim || looked is null || screen == looked || screen.Spec.FollowsMe ? 1f : DimTo) * screen.Spec.Brightness;
             screen.Item.Tint += (target - screen.Item.Tint) * step;
+            if (screen.Edge is { } edge)
+            {
+                edge.Visible = screen.Item.Visible && ScreenEdges;
+                edge.Tint = screen.Item.Tint;
+            }
         }
     }
 
@@ -496,36 +641,70 @@ internal sealed class SpaceScene : IDisposable
     /// </summary>
     public void PointToHiddenScreens(System.Numerics.Quaternion head, DisplayOptics optics, bool show)
     {
-        var hints = new List<(float AngleDeg, string Name)>();
+        var hints = new List<Hint>();
+        var avoid = new List<RectangleF>();
+        RectangleF? cardRect = null;
+        var toView = System.Numerics.Quaternion.Conjugate(head);
         _ring.Visible = _ringAt is not null && !_blank;
         if (!_blank)
         {
             float halfX = optics.HorizontalFovDeg / 2f, halfY = optics.VerticalFovDeg / 2f;
-            void Hint(System.Numerics.Vector3 centre, float halfW, string name)
+            void Add(System.Numerics.Vector3 centre, float halfW, string name, HintKind kind)
             {
                 (float across, float up) = RoomSpot.Angles(centre, head);
                 if (MathF.Abs(across) < halfX + halfW * 0.5f && MathF.Abs(up) < halfY) return; // at least half in view
-                hints.Add((MathF.Atan2(up, across) * 180f / MathF.PI, name));
+                hints.Add(new Hint(MathF.Atan2(up, across) * 180f / MathF.PI, name, kind));
             }
             foreach (LiveScreen screen in _screens.Values)
             {
-                if (show && screen.Shown && !screen.Spec.FollowsMe && screen.Panel is { } panel) Hint(panel.Centre, panel.AngularWidthDeg / 2f, screen.Spec.Name);
+                if (show && screen.Shown && !screen.Spec.FollowsMe && screen.Panel is { } panel) Add(panel.Centre, panel.AngularWidthDeg / 2f, screen.Spec.Name, HintKind.Screen);
             }
             // A bot waiting for the wearer always gets an arrow, whatever the setting for screens says; so do the marks.
             foreach (LiveObject live in _objects.Values)
             {
-                if (live.Object.State == BotState.NeedsYou) Hint(live.Panel.Centre, live.Panel.AngularWidthDeg / 2f, $"{live.Object.Label} needs you");
+                if (live.Object.State == BotState.NeedsYou) Add(live.Panel.Centre, live.Panel.AngularWidthDeg / 2f, $"{live.Object.Label} needs you", HintKind.NeedsYou);
             }
+            // The mouse pointer's mark is labelled "mouse"; any other labelled mark is a window that just opened.
             foreach (Mark m in _marks)
             {
-                if (m.Label.Length > 0) Hint(m.Point, 0, m.Label);
+                if (m.Label.Length > 0) Add(m.Point, 0, m.Label, m.Label == MouseLabel ? HintKind.Mouse : HintKind.Opened);
+            }
+
+            // The card of the bot looked at, and the bots themselves, in display pixels: arrows and labels keep off them.
+            float focal = 960f / MathF.Tan(halfX * MathF.PI / 180f);
+            RectangleF? InView(Panel p, float margin)
+            {
+                var corners = new List<PointF>();
+                foreach ((float s, float t) in (ReadOnlySpan<(float, float)>)[(-0.5f, -0.5f), (0.5f, -0.5f), (-0.5f, 0.5f), (0.5f, 0.5f)])
+                {
+                    System.Numerics.Vector3 v = System.Numerics.Vector3.Transform(p.WorldPoint(s, t), toView);
+                    if (v.Z < -0.01f) corners.Add(new PointF(960 + v.X / -v.Z * focal, 540 - v.Y / -v.Z * focal));
+                }
+                if (corners.Count < 4) return null;
+                var r = RectangleF.FromLTRB(corners.Min(c => c.X) - margin, corners.Min(c => c.Y) - margin, corners.Max(c => c.X) + margin, corners.Max(c => c.Y) + margin);
+                return r.IntersectsWith(new RectangleF(0, 0, 1920, 1080)) ? r : null;
+            }
+            if (_card is { Visible: true } && _cardPanel is { } card) cardRect = InView(card, 16);
+            // The bot pictures are square with room round the name and mark: a little in from each side is about them.
+            foreach (LiveObject live in _objects.Values)
+            {
+                if (InView(live.Panel with { Width = live.Panel.Width * 0.75f, Height = live.Panel.Height * 0.85f }, 0) is { } r) avoid.Add(r);
             }
         }
         _edges.Visible = hints.Count > 0;
-        string key = string.Join("|", hints.Select(h => $"{MathF.Round(h.AngleDeg / 8f)}:{h.Name}"));
+        if (optics != _edgesOptics)
+        {
+            _edgesOptics = optics;
+            _renderer.SetMesh(_edges, EdgesMesh(optics), 0);
+        }
+        // Redrawn when an arrow turns by some degrees or the card moves by a few, not for every small move of the head:
+        // the bots are kept clear of as they were at the last redraw.
+        string key = string.Join("|", hints.Select(h => $"{MathF.Round(h.AngleDeg / 8f)}:{h.Kind}:{h.Name}"))
+            + (cardRect is { } c ? $"|card {MathF.Round(c.X / 96)},{MathF.Round(c.Y / 96)},{MathF.Round(c.Width / 96)}" : "")
+            + (_stereo ? "|3d" : "");
         if (key == _edgesShown) return;
         _edgesShown = key;
-        using Bitmap picture = Pictures.Edges(hints);
+        using Bitmap picture = Pictures.Edges(hints, cardRect, avoid, _stereo);
         _renderer.SetPicture(_edges, picture);
     }
 
@@ -578,6 +757,7 @@ internal sealed class SpaceScene : IDisposable
         foreach (MonitorCapture capture in _captures.Values) capture.Dispose();
         _captures.Clear();
         _captureBounds.Clear();
+        _screenEdge.Dispose();
     }
 
     static bool Same(string? a, string? b) => string.Equals(a, b, StringComparison.OrdinalIgnoreCase);

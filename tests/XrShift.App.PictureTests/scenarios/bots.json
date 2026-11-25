@@ -3,7 +3,14 @@
   // that needs you out of sight. The bots line up 20 degrees below eye level, 9 degrees apart: Reviewer is at yaw 4.5.
   "frames": [
     { "name": "bots-all-states", "layout": "three-screens.layout.json", "deck": "bots.deck.json", "pitch": -8 },
+    // Looking only a little down: the names must already be readable, and nothing may cover them.
+    { "name": "bots-slightly-down", "layout": "three-screens.layout.json", "deck": "bots.deck.json", "pitch": -5 },
     { "name": "bot-card-long-note", "layout": "three-screens.layout.json", "deck": "bots.deck.json", "yaw": 4.5, "pitch": -20 },
-    { "name": "needs-you-out-of-view", "layout": "three-screens.layout.json", "deck": "needs-you-behind.deck.json" }
+    // The card of a bot on another PC, with the arrows to the screens above kept off it.
+    { "name": "bot-card-other-pc", "layout": "three-screens.layout.json", "deck": "bots.deck.json", "yaw": -22.5, "pitch": -20 },
+    { "name": "bot-card-stereo", "layout": "three-screens.layout.json", "deck": "bots.deck.json", "yaw": 4.5, "pitch": -20, "stereo": true },
+    { "name": "needs-you-out-of-view", "layout": "three-screens.layout.json", "deck": "needs-you-behind.deck.json" },
+    // At the low point of the needs-you pulse: dimmed, but its name still reads.
+    { "name": "bots-pulse-low", "layout": "three-screens.layout.json", "deck": "bots.deck.json", "pitch": -8, "time": 0.9 }
   ]
 }

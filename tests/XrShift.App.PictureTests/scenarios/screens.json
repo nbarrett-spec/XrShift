@@ -4,6 +4,10 @@
     { "name": "three-screens-ahead", "layout": "three-screens.layout.json" },
     { "name": "three-screens-right-45", "layout": "three-screens.layout.json", "yaw": -45 },
     { "name": "notice", "layout": "three-screens.layout.json", "notice": "Recentred: the way you face is the front" },
-    { "name": "stereo", "layout": "three-screens.layout.json", "deck": "bots.deck.json", "pitch": -8, "stereo": true }
+    // A notice the wearer has to act on: larger, on a warm-edged plate, wrapped to two lines.
+    { "name": "notice-needs-you", "layout": "three-screens.layout.json", "notice": "These glasses do not report their mode. Set them to Follow in their own menu." },
+    { "name": "stereo", "layout": "three-screens.layout.json", "deck": "bots.deck.json", "pitch": -8, "stereo": true },
+    { "name": "stereo-notice", "layout": "three-screens.layout.json", "notice": "3D on. Set the glasses to 3D side-by-side too.", "stereo": true },
+    { "name": "menu", "layout": "three-screens.layout.json", "menu": true }
   ]
 }
