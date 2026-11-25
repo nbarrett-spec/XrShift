@@ -460,6 +460,17 @@ internal static class Pictures
                 g.DrawString(instruction, big, ink, RectangleF.Inflate(plate, -pad + 2, 0), wrap);
                 y = plate.Bottom + 10;
             }
+            // Always say which keys do what: the first wearer saw "press Confirm" and pressed a button on the glasses.
+            {
+                const string keys = "SPACE confirm      BACKSPACE retry      S skip      ESC cancel";
+                using Font small = Style.Face(Style.Small, bold: true);
+                float w = g.MeasureString(keys, small).Width + Style.Pad * 2;
+                var plate = new RectangleF((GuideWidth - w) / 2, y, w, small.Height + 10);
+                Style.Plate(g, plate, rim: Style.QuietRim);
+                using var ink = new SolidBrush(Style.Ink);
+                g.DrawString(keys, small, ink, plate, Style.Centred);
+                y = plate.Bottom + 10;
+            }
             if (note is { Length: > 0 }) NeedsYou(g, note, GuideWidth / 2f, y);
 
             if (results.Count > 0)

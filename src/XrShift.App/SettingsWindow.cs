@@ -1,4 +1,4 @@
-﻿using System.Runtime.InteropServices;
+using System.Runtime.InteropServices;
 using XrShift.Scene;
 
 namespace XrShift.App;
@@ -337,7 +337,9 @@ internal sealed partial class SettingsWindow : Form
             "How far away it is. It keeps its real size, so further away looks smaller, as a real screen would.", ref y,
             v => Change(s => s.AtDistanceKeepingSize(v / FeetPerMetre)));
         _turn = Slider(_pageScreen, "Turn", -75, 75, 1, 0, 0, "°", true,
-            "Turns the screen to face left or right, like a TV flat on a side wall. 0 faces you. Flat screens only.", ref y, v => Change(s => s with { TurnDeg = v }));
+            "Turns the screen to face left or right, like a TV flat on a side wall. 0 faces you. Turning a curved screen makes it flat.", ref y,
+            // Only a flat screen can be turned. Moving this on a curved one used to do nothing at all, so it flattens it.
+            v => Change(s => s with { TurnDeg = v, CurveDeg = MathF.Abs(v) >= 0.5f ? 0 : s.CurveDeg }));
         _curve = Slider(_pageScreen, "Curve", 0, 120, 1, 0, 0, "°", false,
             "Wraps the screen around you. 0 is flat.", ref y, v => Change(s => s with { CurveDeg = v }));
         _tilt = Slider(_pageScreen, "Tilt", -30, 30, 0.5f, 0, 1, "°", true,

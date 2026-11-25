@@ -223,15 +223,22 @@ internal static class LiveApp
         var invoker = new Control();
         invoker.CreateControl();
         s_show = () => invoker.BeginInvoke(() => tray.ShowBalloonTip(4000, "XrShift", "XrShift is already running. It brings your screens up when the glasses are plugged in.", ToolTipIcon.Info));
+        string settledOn = "";
         var timer = new System.Windows.Forms.Timer { Interval = 1500 };
         timer.Tick += (_, _) =>
         {
             List<DisplayInfo> now = Displays.List();
             if (now.Any(d => d.IsGlasses && !d.Mirrored) || DirectDisplay.GlassesOffDesktop())
             {
+                // Windows rearranges and resizes its displays for a second or two after the glasses are plugged in.
+                // Starting in the middle of that made the scene start, stop and start again; wait until two looks
+                // in a row see the same thing.
+                string seenNow = string.Join("|", now.Select(d => $"{d.Id}@{d.Bounds}"));
+                if (seenNow != settledOn) { settledOn = seenNow; return; }
                 context.ExitThread();
                 return;
             }
+            settledOn = "";
             if (asked || !now.Any(d => d.IsGlasses)) return;
 
             // Plugged in, but Windows is showing the same picture on the glasses as on the PC's screen.
@@ -1852,7 +1859,12 @@ internal static class LiveApp
         {
             guideCursor = fullScreen && !direct && !gameMode && !args.Contains("--free-cursor") && sources.Count > 0;
             monitorAreas = sources.Select(d => d.Bounds).ToList();
-            blocked = [area, .. DesktopPath.Unseen(layout, sources.Select(d => (d.Id, d.Bounds)))];
+            // Only the glasses' own area for now. Also blocking monitors with no visible screen trapped the wearer's
+            // pointer on one screen (2026-11-24): when screens are added hidden, the monitors between the visible
+            // ones become walls. Opt in with --block-unseen until that is solved; a hidden pointer beats a stuck one.
+            blocked = args.Contains("--block-unseen")
+                ? [area, .. DesktopPath.Unseen(layout, sources.Select(d => (d.Id, d.Bounds)))]
+                : [area];
         }
         planCursor = PlanCursor;
         PlanCursor();

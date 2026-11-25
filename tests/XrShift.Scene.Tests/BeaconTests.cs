@@ -53,12 +53,14 @@ public class BeaconTests
     public void ARingAppearsWhenTheRestingPointerStartsMovingAndGoesAfterASecond()
     {
         var beacon = new PointerBeacon();
-        Assert.True(beacon.Step(10, moved: true, inView: true).Ring); // never moved before: it has rested long enough
-        Assert.True(beacon.Step(10.5, moved: true, inView: true).Ring);
-        Assert.False(beacon.Step(11.2, moved: true, inView: true).Ring); // a second on, still moving: no ring
-        Assert.False(beacon.Step(12.5, moved: false, inView: true).Ring);
-        // Rested two seconds: the next move rings again.
-        Assert.True(beacon.Step(13.3, moved: true, inView: true).Ring);
+        Assert.True(beacon.Step(20, moved: true, inView: true).Ring); // never moved before: it has rested long enough
+        Assert.True(beacon.Step(20.5, moved: true, inView: true).Ring);
+        Assert.False(beacon.Step(21.2, moved: true, inView: true).Ring); // a second on, still moving: no ring
+        Assert.False(beacon.Step(22.5, moved: false, inView: true).Ring);
+        // A pause of a few seconds is not long enough to lose the pointer: no ring.
+        Assert.False(beacon.Step(26, moved: true, inView: true).Ring);
+        // Left alone for a good while: the next move rings again.
+        Assert.True(beacon.Step(26 + PointerBeacon.RestSeconds + 1, moved: true, inView: true).Ring);
     }
 
     [Fact]

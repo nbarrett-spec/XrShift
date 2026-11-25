@@ -9,7 +9,7 @@
       "name": "mode-check", "layout": "three-screens.layout.json",
       "guide": {
         "progress": "Before you start: the glasses' mode",
-        "instruction": "Turn your head. If this box stays in front of your eyes, press Confirm. If it stays behind in the room, click the X button on the glasses once and try again.",
+        "instruction": "Turn your head. If this box stays in front of your eyes, press SPACE on the keyboard. If it stays behind in the room, click the X button on the glasses once and try again.",
         "lines": [
           { "from": [-320, 180], "to": [320, 180] }, { "from": [320, 180], "to": [320, -180] },
           { "from": [320, -180], "to": [-320, -180] }, { "from": [-320, -180], "to": [-320, 180] }

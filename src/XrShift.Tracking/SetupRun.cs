@@ -19,7 +19,7 @@ public sealed class SetupRun
 {
     const float RadToDeg = 180f / MathF.PI;
 
-    public const string ModeCheckText = "Turn your head. If this box stays in front of your eyes, press Confirm. If it stays behind in the room, click the X button on the glasses once and try again.";
+    public const string ModeCheckText = "Turn your head. If this box stays in front of your eyes, press SPACE on the keyboard. If it stays behind in the room, click the X button on the glasses once and try again.";
     public const string FinishedText = "Setup is finished. Press Confirm to go back to your screens.";
     public const string RefusedNote = "Refused: nothing was changed. Backspace tries this step again, S skips it.";
 

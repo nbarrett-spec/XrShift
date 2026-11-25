@@ -71,6 +71,16 @@ internal static class Program
         // "Continue / Quit" box, which leaves the virtual monitors behind.
         // One known harmless case is let through: Windows finishing a cross-thread call for a window of an
         // earlier session that is already gone (it crashed the app in a loop on 2026-11-17 after a replug).
+        // Some errors show Windows' "Continue / Quit" box without ever reaching the handlers below (seen when the
+        // glasses are unplugged). Write down where each disposed-object or cross-thread error starts, so the log
+        // says what it was. Only the first few: these can repeat.
+        int noted = 0;
+        AppDomain.CurrentDomain.FirstChanceException += (_, e) =>
+        {
+            if (e.Exception is not (ObjectDisposedException or InvalidOperationException) || Interlocked.Increment(ref noted) > 12) return;
+            Log.Line($"[first sign of an error, thread '{Thread.CurrentThread.Name ?? Environment.CurrentManagedThreadId.ToString()}'] {e.Exception.GetType().Name}: {e.Exception.Message}");
+            Log.Line(Environment.StackTrace);
+        };
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
         Application.ThreadException += (_, e) => LiveApp.WindowError(e.Exception);
         AppDomain.CurrentDomain.UnhandledException += (sender, e) =>

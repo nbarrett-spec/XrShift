@@ -52,7 +52,7 @@ public static class RoomSpot
 /// </summary>
 public sealed class PointerBeacon
 {
-    public const double RestSeconds = 2, RingSeconds = 1, FreshSeconds = 3, LostSeconds = 3;
+    public const double RestSeconds = 15, RingSeconds = 1, FreshSeconds = 3, LostSeconds = 3;
 
     double _movedAt = double.NegativeInfinity, _ringUntil = double.NegativeInfinity, _lostSince = double.NaN;
     bool _told;
