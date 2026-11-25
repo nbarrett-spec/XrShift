@@ -31,6 +31,7 @@ internal static class Program
             case "rest": return Rest(Seconds(args, 40));
             case "analyze" when path is not null: return Analyze(path);
             case "replay" when path is not null: return Replay(path);
+            case "steady" when path is not null: return Steady(path);
             case "synth" when path is not null: return Synth(path);
             case "serve" when path is not null: return Serve(path, s_port);
             default: return Usage();
@@ -44,6 +45,7 @@ internal static class Program
             xrprobe dump [file] [--seconds N]  record the raw stream (default 5 s)
             xrprobe analyze <file>             check a recording's format and rates
             xrprobe replay <file>              run a recording through the tracker
+            xrprobe steady <file>              score picture steadiness on a recording, old prediction vs new
             xrprobe axes                       worn: measure how the sensor sits in the frame (10 s)
             xrprobe rest [--seconds N]         on a desk: measure the gyro's resting offset
             xrprobe synth <file>               write a fake recording (no glasses needed)
@@ -222,6 +224,41 @@ internal static class Program
 
         Console.WriteLine($"{parser.SamplesParsed} samples, {parser.OtherFrames} other records");
         return parser.SamplesParsed > 0 ? 0 : 2;
+    }
+
+    // ---- steady -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Replays a recording through the old prediction (raw turn rate, no cap) and the new one, as if each
+    /// frame were seen 15, 30 and 50 ms after its pose was read, and scores both.
+    /// </summary>
+    static int Steady(string path)
+    {
+        var samples = new List<ImuSample>();
+        new ImuFrameParser().Feed(File.ReadAllBytes(path), samples.Add);
+        if (samples.Count < 2)
+        {
+            Console.WriteLine("No head-motion records in that file.");
+            return 2;
+        }
+        Console.WriteLine($"{samples.Count} samples, {(samples[^1].TimestampNs - samples[0].TimestampNs) * 1e-9:F1} s. Wander is while the head is still; px at {SteadyScore.PixelsPerDegree} px/deg.");
+        Console.WriteLine("ahead  method          wander rms          wander peak         overshoot  steady-turn lag");
+
+        foreach (float ms in new[] { 15f, 30f, 50f })
+        {
+            Print(ms, "old", t => t.GetPose(ms / 1000f));
+            Print(ms, "new", t => t.GetDisplayPose(ms, 0f, out _));
+            Print(ms, "new, no hold", t => t.GetDisplayPose(ms, 0f, out _), readingSteady: false);
+        }
+        return 0;
+
+        void Print(float ms, string name, Func<HeadTracker, HeadPose> read, bool readingSteady = true)
+        {
+            HeadTracker tracker = TrackingConfig.CreateTracker();
+            tracker.ReadingSteady = readingSteady;
+            SteadyScore s = SteadyScore.Of(SteadyScore.Replay(samples, tracker, read), ms / 1000f);
+            Console.WriteLine($"{ms,3:F0} ms  {name,-14}  {s.WanderRmsArcmin,5:F2}' {s.WanderRmsPx,5:F2} px    {s.WanderPeakArcmin,5:F2}' {s.WanderPeakPx,5:F2} px    {s.OvershootDeg,5:F2} deg  {s.LagMs,5:F1} ms");
+        }
     }
 
     // ---- synth --------------------------------------------------------------------------

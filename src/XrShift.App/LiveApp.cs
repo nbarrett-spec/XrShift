@@ -1807,10 +1807,11 @@ internal static class LiveApp
             scene.RulerVisible = now.View.Ruler;
             scene.OverlayVisible = overlayNow;
 
-            // Look ahead by the whole trip: this app's measured share plus the glasses' own delay.
-            float predictMs = MathF.Max(0f, (float)presenter.PoseToScreenMs + now.View.DelayMs);
+            // Look ahead by the whole trip, this app's measured share plus the glasses' own delay; the tracker
+            // smooths and caps it and reports what it used.
+            float predictMs = 0f;
             HeadPose pose = tracker.HasPose
-                ? tracker.GetPose(predictMs / 1000f)
+                ? tracker.GetDisplayPose((float)presenter.PoseToScreenMs, now.View.DelayMs, out predictMs)
                 : new HeadPose(0, 0, 0, Quaternion.Identity);
 
             if (time >= statusAt)

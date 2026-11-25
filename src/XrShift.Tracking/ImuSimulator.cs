@@ -14,7 +14,11 @@ public sealed class ImuSimulator
     Quaternion _orientation; // sensor axes -> world (X forward, Y left, Z up)
     ulong _timestampNs = 1_000_000_000;
 
+    readonly Random _random = new(1234); // fixed seed: tests must see the same noise every run
+
     public Vector3 GyroBias { get; set; }
+    /// <summary>White sensor noise on each gyro axis, rad/s rms. It is in the reading only, not in the head's motion.</summary>
+    public float GyroNoise { get; set; }
 
     public ImuSimulator(AxisMap? axes = null)
     {
@@ -42,6 +46,10 @@ public sealed class ImuSimulator
 
         _timestampNs += (ulong)Math.Round(dt * 1e9);
         Vector3 accel = Vector3.Transform(new Vector3(0, 0, Gravity), Quaternion.Conjugate(_orientation));
-        return new ImuSample(_timestampNs, rate + GyroBias, accel);
+        Vector3 noise = GyroNoise > 0 ? new Vector3(Gaussian(), Gaussian(), Gaussian()) * GyroNoise : Vector3.Zero;
+        return new ImuSample(_timestampNs, rate + GyroBias + noise, accel);
     }
+
+    float Gaussian() =>
+        MathF.Sqrt(-2f * MathF.Log(1f - _random.NextSingle())) * MathF.Cos(2f * MathF.PI * _random.NextSingle());
 }
