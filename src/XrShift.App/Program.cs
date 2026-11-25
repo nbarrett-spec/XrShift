@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Drawing.Imaging;
 using System.Globalization;
 using System.Numerics;
+using System.Text.Json;
 using XrShift.Scene;
 using XrShift.Tracking;
 
@@ -51,6 +52,8 @@ internal static class Program
 
         string? shot = Option(args, "--shot");
         if (shot is not null) return Shot(shot, args);
+        if (Option(args, "--scenario") is { } scenario) return Scenario(scenario, Option(args, "--out") ?? "shots", args.Contains("--software"));
+        if (Option(args, "--replay-capture") is { } imu) return ReplayCapture(imu, args);
 
         // One copy at a time. Two copies fight over the glasses and the virtual monitors and slow the whole PC;
         // starting it again just brings the running copy's settings window forward.
@@ -124,6 +127,16 @@ internal static class Program
               --shot FILE.png            draw one frame of the saved layout to a picture and exit (add --capture for live monitors), with either
                 --yaw D --pitch D --roll D     a head pose (left, up and tilt-right are positive), or
                 --after S                      the tracked pose after S seconds of head motion
+                --layout FILE.json             a layout file instead of the saved layout and this PC's monitors
+                --deck FILE.json               bots: [{"id","kind","label","state","pc","note","offline","yaw","pitch"}]
+                --notice "text"                the status line says this
+                --stereo                       3D side by side
+                --time S                       the moment the bots' pulsing is drawn at (default 0)
+                --software                     draw with Windows' software renderer
+              --scenario FILE.json --out DIR   draw every frame a scenario lists to DIR\<name>.png, plus DIR\index.json
+              --replay-capture IMU --out DIR   run the head tracker over a recording ('xrprobe dump' or 'synth') and save the
+                --seconds S --every MS         frame the wearer sees every MS ms for S seconds, with DIR\poses.csv
+                --predict MS --layout F --deck F   (prediction default 25 ms; layout default one test screen ahead)
               --settings-shot FILE.png   save a picture of the settings window and exit (--page screen|stationary|follow|tune, --stationary)
             Keys, from any program: Ctrl+Alt+0 (or Home, or Space) recentre, Ctrl+Alt+S settings, Ctrl+Alt+Q quit,
             Ctrl+Alt+1 to 4 profiles, Ctrl+Alt+G game mode (glasses show their own desktop),
@@ -186,9 +199,14 @@ internal static class Program
 
     // ---- one frame to a file ------------------------------------------------------------
 
+    /// <summary>Exit code when not even Windows' software renderer could be started: picture tests skip on it.</summary>
+    const int NoGraphics = 4;
+
     static int Shot(string path, string[] args)
     {
-        ViewSettings view = ViewSettings.Load();
+        string? layoutFile = Option(args, "--layout");
+        // From a layout file, nothing about this PC (its monitors, its tuned settings) goes into the picture.
+        ViewSettings view = layoutFile is null ? ViewSettings.Load() : ViewSettings.Default;
         view = view with { FovDeg = Number(args, "--fov", view.FovDeg) };
         float after = Number(args, "--after", 0);
         DisplayOptics optics = DisplayOptics.OnePro with { HorizontalFovDeg = view.FovDeg };
@@ -222,18 +240,35 @@ internal static class Program
         else
         {
             float yaw = Number(args, "--yaw", 0), pitch = Number(args, "--pitch", 0), roll = Number(args, "--roll", 0);
-            head = Quaternion.CreateFromYawPitchRoll(yaw * DegToRad, pitch * DegToRad, -roll * DegToRad);
-            status = $"still frame   yaw {yaw:F1}  pitch {pitch:F1}  roll {roll:F1}";
+            head = HeadAt(yaw, pitch, roll);
+            status = StillStatus(yaw, pitch, roll);
         }
 
-        List<DisplayInfo> displays = Displays.List();
-        IReadOnlyList<DisplayInfo> sources = displays.Where(d => !d.IsGlasses).ToList();
-        Layout layout = LayoutStore.WithScreensFor((LayoutStore.Load() ?? new Workspace()).Current.Layout, sources, optics);
+        Layout layout;
+        IReadOnlyList<DisplayInfo> sources;
+        string? glasses = null;
+        string? why = null;
+        if (layoutFile is not null)
+        {
+            if (!TryReadLayout(layoutFile, out layout, out why)) { Console.WriteLine(why); return 2; }
+            sources = [];
+        }
+        else
+        {
+            List<DisplayInfo> displays = Displays.List();
+            sources = displays.Where(d => !d.IsGlasses).ToList();
+            layout = LayoutStore.WithScreensFor((LayoutStore.Load() ?? new Workspace()).Current.Layout, sources, optics);
+            glasses = displays.FirstOrDefault(d => d.IsGlasses)?.DeviceName;
+        }
+        Deck deck = new();
+        if (Option(args, "--deck") is { } deckFile && !TryReadDeck(deckFile, out deck, out why)) { Console.WriteLine(why); return 2; }
         bool live = args.Contains("--capture");
 
-        using var renderer = new Renderer(optics.Width, optics.Height, displays.FirstOrDefault(d => d.IsGlasses)?.DeviceName);
+        if (!TryRenderer(optics, glasses, args.Contains("--software"), out Renderer? made)) return NoGraphics;
+        using Renderer renderer = made!;
         using var scene = new SpaceScene(renderer, live);
         scene.Apply(layout, sources, live ? WindowFinder.Resolve(layout, new Dictionary<string, IntPtr>(), search: true) : null, optics);
+        scene.Apply(deck);
         if (live)
         {
             // The first frame comes as soon as Windows has one; give it a moment.
@@ -241,20 +276,267 @@ internal static class Program
             while (!scene.Update() && waited.Elapsed.TotalSeconds < 3) Thread.Sleep(20);
             status += scene.Updates > 0 ? $"   {scene.LiveCount} live" : "   no frame from the monitors";
         }
-        scene.RulerVisible = view.Ruler || args.Contains("--ruler");
-        scene.SetStatus($"{status}   {layout.Screens.Count} screens   view {view.FovDeg:F1}°");
 
-        Quaternion trim = Quaternion.CreateFromYawPitchRoll(0, -view.LevelDeg * DegToRad, view.RollDeg * DegToRad);
-        scene.Look(head * trim, false, false, 1f, Number(args, "--easy", view.EasyReading));
-        scene.PointToHiddenScreens(head * trim, optics, view.EdgeArrows);
-        if (args.Contains("--menu")) scene.SetMenu(["Hide all", "Recentre", "Put here", "Next profile", "Close"], 1);
-        renderer.Draw(head * trim, optics);
-
-        using Bitmap picture = renderer.Capture();
+        var frame = new ShotFrame
+        {
+            Notice = Option(args, "--notice"),
+            Stereo = args.Contains("--stereo"),
+            Time = Number(args, "--time", 0),
+            Menu = args.Contains("--menu"),
+            Ruler = view.Ruler || args.Contains("--ruler"),
+        };
+        view = view with { EasyReading = Number(args, "--easy", view.EasyReading) };
+        using Bitmap picture = DrawFrame(renderer, scene, head, optics, view, frame, $"{status}   {layout.Screens.Count} screens   view {view.FovDeg:F1}°");
         SavePng(picture, path);
         if (scene.LastProblem is not null) Console.WriteLine(scene.LastProblem);
         Console.WriteLine($"{status} -> {path}{(renderer.Software ? " (software renderer)" : "")}");
         return 0;
+    }
+
+    /// <summary>
+    /// One frame of a scenario, or the extras of a single shot. Everything that changes the picture is given here,
+    /// so the same frame always gives the same pixels. Paths are relative to the scenario file.
+    /// </summary>
+    sealed record ShotFrame
+    {
+        public string Name { get; init; } = "";
+        public string? Layout { get; init; }
+        public string? Deck { get; init; }
+        public float Yaw { get; init; }
+        public float Pitch { get; init; }
+        public float Roll { get; init; }
+        /// <summary>What the status line says instead of describing the frame.</summary>
+        public string? Notice { get; init; }
+        public bool Stereo { get; init; }
+        /// <summary>The moment, in seconds, at which pulsing bots are drawn.</summary>
+        public float Time { get; init; }
+        public bool Menu { get; init; }
+        public bool Ruler { get; init; }
+    }
+
+    sealed record ScenarioFile
+    {
+        public List<ShotFrame> Frames { get; init; } = [];
+    }
+
+    sealed record DeckEntry
+    {
+        public string? Id { get; init; }
+        public string? Kind { get; init; }
+        public string? Label { get; init; }
+        public string? State { get; init; }
+        public string? Pc { get; init; }
+        public string? Note { get; init; }
+        public bool Offline { get; init; }
+        public float? Yaw { get; init; }
+        public float? Pitch { get; init; }
+        public float? Distance { get; init; }
+    }
+
+    static readonly JsonSerializerOptions Lenient = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        ReadCommentHandling = JsonCommentHandling.Skip,
+        AllowTrailingCommas = true,
+    };
+
+    static Quaternion HeadAt(float yaw, float pitch, float roll) =>
+        Quaternion.CreateFromYawPitchRoll(yaw * DegToRad, pitch * DegToRad, -roll * DegToRad);
+
+    static string StillStatus(float yaw, float pitch, float roll) => $"still frame   yaw {yaw:F1}  pitch {pitch:F1}  roll {roll:F1}";
+
+    /// <summary>Draws everything the wearer sees from this head direction and reads it back as a picture.</summary>
+    static Bitmap DrawFrame(Renderer renderer, SpaceScene scene, Quaternion head, DisplayOptics optics, ViewSettings view, ShotFrame frame, string status, float seconds = 1f)
+    {
+        scene.RulerVisible = frame.Ruler;
+        scene.SetStatus(frame.Notice ?? status);
+        Quaternion trim = Quaternion.CreateFromYawPitchRoll(0, -view.LevelDeg * DegToRad, view.RollDeg * DegToRad);
+        scene.Look(head * trim, false, false, seconds, view.EasyReading, clock: frame.Time);
+        scene.PointToHiddenScreens(head * trim, optics, view.EdgeArrows);
+        scene.SetMenu(frame.Menu ? ["Hide all", "Recentre", "Put here", "Next profile", "Close"] : null, 1);
+        renderer.Draw(head * trim, optics, frame.Stereo ? Camera.DefaultEyeSeparation : 0);
+        return renderer.Capture();
+    }
+
+    static bool TryRenderer(DisplayOptics optics, string? monitor, bool software, out Renderer? renderer)
+    {
+        try
+        {
+            renderer = new Renderer(optics.Width, optics.Height, monitor, software);
+            return true;
+        }
+        catch (Exception e)
+        {
+            Console.WriteLine($"No Direct3D device could be made, not even Windows' software one: {e.Message}");
+            renderer = null;
+            return false;
+        }
+    }
+
+    /// <summary>A layout file as the app saves it (all profiles, the one in use is drawn) or a single arrangement.</summary>
+    static bool TryReadLayout(string path, out Layout layout, out string why)
+    {
+        layout = new Layout();
+        why = "";
+        try
+        {
+            if (Workspace.TryParse(File.ReadAllText(path), out Workspace workspace))
+            {
+                layout = workspace.Current.Layout;
+                return true;
+            }
+            why = $"{path} is not a layout file.";
+        }
+        catch (IOException e) { why = $"Could not read {path}: {e.Message}"; }
+        return false;
+    }
+
+    /// <summary>Bots from a list in a file. Ones without a place line up as the app lines them up.</summary>
+    static bool TryReadDeck(string path, out Deck deck, out string why)
+    {
+        deck = new Deck();
+        why = "";
+        List<DeckEntry>? entries;
+        try { entries = JsonSerializer.Deserialize<List<DeckEntry>>(File.ReadAllText(path), Lenient); }
+        catch (Exception e) when (e is IOException or JsonException) { why = $"Could not read {path}: {e.Message}"; return false; }
+        int n = 0;
+        foreach (DeckEntry e in entries ?? [])
+        {
+            n++;
+            if ((e.State is null ? BotState.Idle : SceneObject.ParseState(e.State)) is not { } state)
+            {
+                why = $"{path}: bot {n} has state '{e.State}'; use idle, working, needs_you, done or failed.";
+                return false;
+            }
+            bool placed = e.Yaw is not null || e.Pitch is not null;
+            deck = deck.With(new SceneObject
+            {
+                Id = e.Id ?? $"bot{n}", // never the random default: the same file must give the same picture
+                Kind = e.Kind ?? "bot",
+                Label = e.Label ?? "Bot",
+                State = state,
+                Pc = e.Pc ?? "",
+                Note = e.Note ?? "",
+                Offline = e.Offline,
+                YawDeg = e.Yaw ?? 0,
+                PitchDeg = e.Pitch ?? 0,
+                Distance = e.Distance ?? 1.5f,
+                Placed = placed,
+            });
+        }
+        return true;
+    }
+
+    // ---- many frames to files -------------------------------------------------------------
+
+    /// <summary>
+    /// Draws every frame a scenario file lists, each from scratch so no frame depends on the one before, into
+    /// <paramref name="outFolder"/> as name.png, with index.json saying what each one is. Touches no monitor,
+    /// no glasses and no saved settings.
+    /// </summary>
+    static int Scenario(string scenarioPath, string outFolder, bool software)
+    {
+        ScenarioFile? scenario;
+        try { scenario = JsonSerializer.Deserialize<ScenarioFile>(File.ReadAllText(scenarioPath), Lenient); }
+        catch (Exception e) when (e is IOException or JsonException) { Console.WriteLine($"Could not read {scenarioPath}: {e.Message}"); return 2; }
+        if (scenario is null || scenario.Frames.Count == 0) { Console.WriteLine($"{scenarioPath} lists no frames."); return 2; }
+        string home = Path.GetDirectoryName(Path.GetFullPath(scenarioPath))!;
+        string? Near(string? file) => file is null ? null : Path.GetFullPath(Path.Combine(home, file));
+
+        Directory.CreateDirectory(outFolder);
+        ViewSettings view = ViewSettings.Default;
+        DisplayOptics optics = DisplayOptics.OnePro with { HorizontalFovDeg = view.FovDeg };
+        var index = new List<object>();
+        string adapter = "";
+        bool usedSoftware = false;
+        foreach (ShotFrame frame in scenario.Frames)
+        {
+            if (frame.Name.Length == 0 || frame.Name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || frame.Name.Contains(' '))
+            {
+                Console.WriteLine($"Frame name '{frame.Name}' must be a plain file name without spaces.");
+                return 2;
+            }
+            Layout layout = new();
+            Deck deck = new();
+            if (Near(frame.Layout) is { } layoutFile && !TryReadLayout(layoutFile, out layout, out string why)) { Console.WriteLine(why); return 2; }
+            if (Near(frame.Deck) is { } deckFile && !TryReadDeck(deckFile, out deck, out why)) { Console.WriteLine(why); return 2; }
+
+            if (!TryRenderer(optics, null, software, out Renderer? made)) return NoGraphics;
+            using Renderer renderer = made!;
+            using var scene = new SpaceScene(renderer, live: false);
+            scene.Apply(layout, [], null, optics);
+            scene.Apply(deck);
+            using Bitmap picture = DrawFrame(renderer, scene, HeadAt(frame.Yaw, frame.Pitch, frame.Roll), optics, view, frame,
+                $"{StillStatus(frame.Yaw, frame.Pitch, frame.Roll)}   {layout.Screens.Count} screens   view {view.FovDeg:F1}°");
+            string file = frame.Name + ".png";
+            SavePng(picture, Path.Combine(outFolder, file));
+            adapter = renderer.AdapterName;
+            usedSoftware = renderer.Software;
+            index.Add(new { frame.Name, File = file, frame.Yaw, frame.Pitch, frame.Roll, frame.Stereo, frame.Notice, frame.Time, frame.Layout, frame.Deck });
+            Console.WriteLine($"{frame.Name} -> {Path.Combine(outFolder, file)}");
+        }
+        File.WriteAllText(Path.Combine(outFolder, "index.json"), JsonSerializer.Serialize(
+            new { Scenario = Path.GetFileName(scenarioPath), Adapter = adapter, Software = usedSoftware, Frames = index },
+            new JsonSerializerOptions { WriteIndented = true }));
+        return 0;
+    }
+
+    /// <summary>
+    /// Runs the head tracker over a recorded (or made-up) stream of motion samples, in this process at no particular
+    /// speed, and saves the frame the wearer would see every <c>--every</c> milliseconds of recording time, plus
+    /// poses.csv. Flipping through the frames shows any bounce or drift the tracker adds.
+    /// </summary>
+    static int ReplayCapture(string imuPath, string[] args)
+    {
+        string outFolder = Option(args, "--out") ?? "replay";
+        float seconds = Number(args, "--seconds", 10), everyMs = Number(args, "--every", 100), predictMs = Number(args, "--predict", 25);
+        if (!(seconds > 0) || !(everyMs >= 1)) { Console.WriteLine("--seconds must be above 0 and --every at least 1."); return 2; }
+
+        var samples = new List<ImuSample>();
+        try { new ImuFrameParser().Feed(File.ReadAllBytes(imuPath), samples.Add); }
+        catch (IOException e) { Console.WriteLine($"Could not read {imuPath}: {e.Message}"); return 2; }
+        if (samples.Count < 2) { Console.WriteLine($"No head-motion records in {imuPath}."); return 2; }
+
+        Layout layout = new Layout().Add(new ScreenSpec { Id = "ahead", Name = "Screen" });
+        Deck deck = new();
+        if (Option(args, "--layout") is { } layoutFile && !TryReadLayout(layoutFile, out layout, out string why)) { Console.WriteLine(why); return 2; }
+        if (Option(args, "--deck") is { } deckFile && !TryReadDeck(deckFile, out deck, out why)) { Console.WriteLine(why); return 2; }
+
+        ViewSettings view = ViewSettings.Default;
+        DisplayOptics optics = DisplayOptics.OnePro with { HorizontalFovDeg = view.FovDeg };
+        if (!TryRenderer(optics, null, args.Contains("--software"), out Renderer? made)) return NoGraphics;
+        using Renderer renderer = made!;
+        using var scene = new SpaceScene(renderer, live: false);
+        scene.Apply(layout, [], null, optics);
+        scene.Apply(deck);
+        Directory.CreateDirectory(outFolder);
+
+        HeadTracker tracker = TrackingConfig.CreateTracker();
+        var csv = new System.Text.StringBuilder("time_s,yaw_deg,pitch_deg,roll_deg\n");
+        ulong start = samples[0].TimestampNs;
+        double next = 0, step = everyMs / 1000.0;
+        bool centred = false;
+        int count = 0;
+        foreach (ImuSample sample in samples)
+        {
+            tracker.Update(sample);
+            double t = (sample.TimestampNs - start) * 1e-9;
+            if (t > seconds) break;
+            if (!tracker.HasPose || t < next) continue;
+            if (!centred) { tracker.GetPose(); centred = true; } // straight ahead = where the head starts, as in the app
+            while (next <= t) next += step;
+
+            HeadPose pose = tracker.GetPose(predictMs / 1000f);
+            var frame = new ShotFrame { Time = (float)t };
+            using Bitmap picture = DrawFrame(renderer, scene, pose.Orientation, optics, view, frame,
+                $"replay  t {t:F2} s   yaw {pose.YawDeg:F1}  pitch {pose.PitchDeg:F1}  roll {pose.RollDeg:F1}", (float)step);
+            SavePng(picture, Path.Combine(outFolder, $"{count:D4}.png"));
+            csv.Append(string.Create(CultureInfo.InvariantCulture, $"{t:F3},{pose.YawDeg:F3},{pose.PitchDeg:F3},{pose.RollDeg:F3}\n"));
+            count++;
+        }
+        File.WriteAllText(Path.Combine(outFolder, "poses.csv"), csv.ToString());
+        Console.WriteLine($"{count} frames and poses.csv -> {outFolder}{(renderer.Software ? " (software renderer)" : "")}");
+        return count > 0 ? 0 : 2;
     }
 
     /// <summary>Draws the settings window as it would open, for checking its look without a person at the screen.</summary>

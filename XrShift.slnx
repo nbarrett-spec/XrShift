@@ -6,6 +6,7 @@
     <Project Path="src/XrShift.Tracking/XrShift.Tracking.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/XrShift.App.PictureTests/XrShift.App.PictureTests.csproj" />
     <Project Path="tests/XrShift.Scene.Tests/XrShift.Scene.Tests.csproj" />
     <Project Path="tests/XrShift.Tracking.Tests/XrShift.Tracking.Tests.csproj" />
   </Folder>

@@ -1,0 +1,8 @@
+[
+  { "id": "planner", "label": "Planner", "state": "idle" },
+  { "id": "builder", "label": "Builder", "state": "working", "note": "Running the build: 3 of 7 projects done." },
+  { "id": "reviewer", "label": "Reviewer", "state": "needs_you", "note": "May I delete the folder shots\\old? It holds 214 pictures from last week's runs, none of them used by a test or a document." },
+  { "id": "deployer", "label": "Deployer", "state": "failed", "note": "dotnet publish stopped: XrShift.exe is in use by another process." },
+  { "id": "indexer", "label": "Indexer", "state": "working", "pc": "LAPTOP", "offline": true, "note": "Indexing 12,400 files..." },
+  { "id": "tester", "label": "Tester", "state": "done", "pc": "STUDIO", "note": "All 206 tests pass." }
+]

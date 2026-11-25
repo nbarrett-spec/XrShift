@@ -1,0 +1,3 @@
+# Written next to an approved picture when a test finds it changed; copied over it to approve.
+*.new.png
+*.diff.png

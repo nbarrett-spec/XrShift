@@ -1,0 +1,9 @@
+{
+  // Bots in every state (one on another PC, one offline), the card of the one looked at, and the arrow to one
+  // that needs you out of sight. The bots line up 20 degrees below eye level, 9 degrees apart: Reviewer is at yaw 4.5.
+  "frames": [
+    { "name": "bots-all-states", "layout": "three-screens.layout.json", "deck": "bots.deck.json", "pitch": -8 },
+    { "name": "bot-card-long-note", "layout": "three-screens.layout.json", "deck": "bots.deck.json", "yaw": 4.5, "pitch": -20 },
+    { "name": "needs-you-out-of-view", "layout": "three-screens.layout.json", "deck": "needs-you-behind.deck.json" }
+  ]
+}

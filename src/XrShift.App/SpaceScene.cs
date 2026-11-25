@@ -408,9 +408,9 @@ internal sealed class SpaceScene : IDisposable
     }
 
     /// <summary>Once per frame: a working bot pulses slowly, one that needs the wearer pulses fast, an idle one is dim.</summary>
-    void Pulse(float seconds, bool blank)
+    void Pulse(float seconds, bool blank, float? clock)
     {
-        _time += seconds;
+        _time = clock ?? _time + seconds;
         foreach (LiveObject live in _objects.Values)
         {
             live.Item.Visible = !blank;
@@ -429,10 +429,11 @@ internal sealed class SpaceScene : IDisposable
     /// black), and with <paramref name="dim"/> darkens the screens the wearer is not looking at, fading over
     /// about a tenth of a second so the change is not a flicker at the edges.
     /// </summary>
-    public void Look(System.Numerics.Quaternion head, bool dim, bool blank, float seconds, float easyReading = 0)
+    /// <param name="clock">For test pictures: the time in seconds the pulsing is drawn at, instead of the running clock.</param>
+    public void Look(System.Numerics.Quaternion head, bool dim, bool blank, float seconds, float easyReading = 0, float? clock = null)
     {
         _blank = blank;
-        Pulse(seconds, blank);
+        Pulse(seconds, blank, clock);
         foreach (LiveScreen screen in _screens.Values)
         {
             // Reading without glasses: sharper edges and a little more contrast on every screen.
