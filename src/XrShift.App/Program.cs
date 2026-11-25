@@ -349,7 +349,9 @@ internal static class Program
     static Bitmap DrawFrame(Renderer renderer, SpaceScene scene, Quaternion head, DisplayOptics optics, ViewSettings view, ShotFrame frame, string status, float seconds = 1f)
     {
         scene.RulerVisible = frame.Ruler;
-        scene.SetStatus(frame.Notice ?? status);
+        scene.Stereo = frame.Stereo;
+        scene.SetNotice(frame.Notice ?? "", SpaceScene.GuessNoticeLevel(frame.Notice ?? ""));
+        scene.SetStatus(frame.Notice is null ? status : "");
         Quaternion trim = Quaternion.CreateFromYawPitchRoll(0, -view.LevelDeg * DegToRad, view.RollDeg * DegToRad);
         scene.Look(head * trim, false, false, seconds, view.EasyReading, clock: frame.Time);
         scene.PointToHiddenScreens(head * trim, optics, view.EdgeArrows);

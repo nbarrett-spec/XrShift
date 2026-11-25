@@ -1831,7 +1831,11 @@ internal static class LiveApp
                 string tracking = link.State != XrShift.Tracking.LinkState.Connected || trackHz < 1
                     ? "no head tracking"
                     : $"yaw {pose.YawDeg,6:F1}  pitch {pose.PitchDeg,6:F1}  roll {pose.RollDeg,6:F1}";
-                if (noticeNow.Length > 0) scene.SetStatus(noticeNow);
+                // Notices have their own area; while one shows, the status strip stays empty unless pinned.
+                // Callers should pass a notice's level themselves; until they do it is guessed from its words.
+                scene.Stereo = now.Stereo;
+                scene.SetNotice(noticeNow, SpaceScene.GuessNoticeLevel(noticeNow));
+                if (noticeNow.Length > 0 && !now.StatusPinned) scene.SetStatus("");
                 else scene.SetStatus(string.Create(CultureInfo.InvariantCulture,
                     $"{fps:F0} fps   {tracking}   predict {predictMs:F1} ms   view {now.View.FovDeg:F1}°   level {now.View.LevelDeg:F2}°   {workspaceName}{(now.View.LookPointer ? (now.View.LookFollow ? "   pointer follows" : "   look-to-move") : "")}{(now.View.Follow ? "   screens follow" : "")}{(MathF.Abs(now.View.Zoom - 1f) > 0.01f ? $"   zoom {now.View.Zoom * 100:F0}%" : "")}{(now.Blank ? "   screens hidden" : "")}") +
                     (time < 12 ? $"   ·   {recentreKey} recentres" : ""));
