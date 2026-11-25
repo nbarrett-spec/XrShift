@@ -51,7 +51,106 @@ internal sealed partial class SettingsWindow
         if (index == BotsIndex) ShowBots();
         if (index == VoiceIndex) ShowVoice();
         if (index == PcsIndex) ShowPcs();
-        if (index is 0 or BotsIndex) _pageTimer.Start();
+        if (index == GamesIndex) ShowVrNeeds();
+        if (index is 0 or BotsIndex or GamesIndex) _pageTimer.Start();
+    }
+
+    // ---- Games: what VR mode needs ------------------------------------------------------------------
+
+    const int GamesIndex = 3;
+    readonly Label[] _vrMarks = [new(), new(), new(), new(), new()], _vrLines = [new(), new(), new(), new(), new()];
+    readonly PillButton _vrRegister = new(), _vrUnregister = new();
+    (bool Connected, Size Size, double Hz)? _vrGlasses; // null: not known (no glasses session, e.g. a settings picture)
+
+    /// <summary>The glasses as the running session sees them, for the VR checklist. Called every second.</summary>
+    public void SetVrGlasses(bool connected, Size size, double hz)
+    {
+        _vrGlasses = (connected, size, hz);
+        if (_gamesPage.Visible) ShowVrNeeds();
+    }
+
+    void BuildVrNeeds(Control card, int w)
+    {
+        for (int i = 0; i < _vrLines.Length; i++)
+        {
+            AddLabel(card, _vrMarks[i], 20, 116 + i * 62, 26, 26, Ui.Muted, 12f);
+            AddLabel(card, _vrLines[i], 50, 118 + i * 62, w - 72, 58, Ui.Ink, 9.5f);
+        }
+        AddLabel(card, new Label
+        {
+            Text = "To stop, press the same button or Ctrl+Alt+V: SteamVR closes and your screens come back. " +
+                   "XrShift only turns your head, it does not track leaning or walking: games that need you to move around will not work well.",
+        }, 20, card.Height - 132, w - 40, 60, Ui.Muted, 9.5f);
+        Place(_vrRegister, card, "Register driver", 232, card.Height - 62, 170, 42, PillButton.Looks.Ghost,
+            "Adds this copy's VR driver to SteamVR's list of drivers for your Windows user, keeping a copy of the list and every other driver.");
+        _vrRegister.Click += (_, _) => ChangeVrRegistration(register: true);
+        Place(_vrUnregister, card, "Unregister", 414, card.Height - 62, 140, 42, PillButton.Looks.Ghost,
+            "Takes XrShift's VR driver out of SteamVR's list, keeping a copy of the list and every other driver. Use it before deleting this copy of XrShift.");
+        _vrUnregister.Click += (_, _) => ChangeVrRegistration(register: false);
+        _pageTimer.Tick += (_, _) => { if (_gamesPage.Visible) ShowVrNeeds(); };
+    }
+
+    void ShowVrNeeds()
+    {
+        bool driver = VrBridge.DriverPresent;
+        string? steamVr = VrBridge.SteamVrFolder();
+        SteamVrSetup.Registration registration = VrBridge.Registration(out string? problem);
+        (bool, string)[] needs =
+        [
+            (driver, driver
+                ? "XrShift's VR driver is in this copy of XrShift."
+                : "XrShift's VR driver is not in this copy of XrShift. It comes with releases built on GitHub: install one of those."),
+            (steamVr is not null, steamVr is not null
+                ? $"SteamVR is installed ({steamVr})."
+                : "SteamVR is not installed. In Steam, search the store for SteamVR (it is free), install it, start it once and close it."),
+            (registration == SteamVrSetup.Registration.Current, registration switch
+            {
+                SteamVrSetup.Registration.Current => "SteamVR knows XrShift's driver (registered for your Windows user).",
+                SteamVrSetup.Registration.Other => "SteamVR knows another copy of XrShift's driver. Register driver, or Start VR, points it at this one.",
+                SteamVrSetup.Registration.NoFile => "SteamVR has not been run on this PC yet, so it has no driver list. Start it once from Steam and close it.",
+                SteamVrSetup.Registration.Unreadable => $"SteamVR's driver list could not be read, so XrShift leaves it alone: {problem ?? "it is not plain JSON."}",
+                _ => "SteamVR does not know XrShift's driver yet. Register driver, or Start VR does it.",
+            }),
+            (!_glassesStationary, _glassesStationary
+                ? "The glasses are in Stationary. Switch them to Follow with their button: VR needs the picture to move with your head."
+                : "The glasses are in Follow."),
+            GlassesNeed(),
+        ];
+        for (int i = 0; i < needs.Length; i++)
+        {
+            (bool met, string text) = needs[i];
+            // The glasses' 3D mode is a wish, not a need: flat VR works, without depth. Unknown is not a failure either.
+            bool glasses = i == needs.Length - 1;
+            bool wish = glasses && _vrGlasses is { Connected: true }, unknown = glasses && _vrGlasses is null;
+            _vrMarks[i].Text = met ? "✓" : wish || unknown ? "–" : "✗";
+            _vrMarks[i].ForeColor = met ? Ui.Good : wish ? Ui.Warn : unknown ? Ui.Muted : Ui.Bad;
+            _vrLines[i].Text = text;
+        }
+        _vrRegister.Enabled = driver && registration is SteamVrSetup.Registration.None or SteamVrSetup.Registration.Other;
+        _vrUnregister.Enabled = registration is SteamVrSetup.Registration.Current or SteamVrSetup.Registration.Other;
+    }
+
+    (bool, string) GlassesNeed()
+    {
+        if (_vrGlasses is not { } g) return (false, "The glasses: shown here while XrShift is running with them.");
+        if (!g.Connected) return (false, "The glasses' head tracking is not connected. Plug them in.");
+        bool sideBySide = g.Size.Width >= g.Size.Height * 3;
+        string mode = $"{g.Size.Width} x {g.Size.Height} at {g.Hz:F0} Hz";
+        return sideBySide
+            ? (true, $"The glasses are in their 3D mode ({mode}): one full picture per eye, with depth.")
+            : (false, $"The glasses are flat ({mode}): VR works, both eyes see the same picture, no depth. For depth, choose 3D in the glasses' own menu before starting VR.");
+    }
+
+    void ChangeVrRegistration(bool register)
+    {
+        string what = register
+            ? $"Adds XrShift's VR driver to SteamVR's list of drivers for your Windows user:\n{VrBridge.DriverFolder}"
+            : "Takes XrShift's VR driver out of SteamVR's list of drivers.";
+        if (!Ask($"{what}\n\nFile: {VrBridge.VrPathsFile}\nA copy of the file as it is now is saved beside it first, and every other driver stays." +
+                 (VrBridge.SteamVrRunning() ? "\n\nSteamVR is running: the change applies when it next starts." : "") + "\n\nGo ahead?",
+                register ? "Register the VR driver" : "Unregister the VR driver")) return;
+        if (VrBridge.ChangeRegistration(register) is { } why) Tell("Nothing was changed. " + why);
+        ShowVrNeeds();
     }
 
     // ---- Screens: size presets, layout presets, zoom steps ----------------------------------------

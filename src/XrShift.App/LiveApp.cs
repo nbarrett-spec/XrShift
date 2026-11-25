@@ -385,15 +385,19 @@ internal static class LiveApp
         using var cts = new CancellationTokenSource();
         HeadTracker tracker = TrackingConfig.CreateTracker();
         GlassesConnection link = Program.NewLink(args);
-        // VR mode: every reading also goes to XrShift's SteamVR driver, a little ahead in time to cover SteamVR's
-        // own drawing (see VrBridge).
+        // VR mode: every reading also goes to XrShift's SteamVR driver as it is, with the head's turn rate, and
+        // SteamVR predicts to its own display time (see HeadTracker.GetVrPose and docs/VR.md).
         VrBridge? vrBridge = null;
         bool vrMode = false;
         link.Sample += s =>
         {
             tracker.Update(s);
             if (shared.Calibration is { } run) lock (run) run.Add(s); // the same samples the tracker gets
-            if (vrBridge is { } vr && tracker.HasPose) vr.Publish(tracker.GetPose(0.012f).Orientation);
+            if (vrMode && vrBridge is { } vr && tracker.HasPose)
+            {
+                HeadPose head = tracker.GetVrPose(out System.Numerics.Vector3 turning);
+                vr.Publish(head.Orientation, turning);
+            }
         };
         Thread reader = link.Start(cts.Token);
 
@@ -647,6 +651,7 @@ internal static class LiveApp
                 : tracking ? string.Create(CultureInfo.InvariantCulture, $"{presenter.FramesPerSecond:F0} fps · {presenter.PoseToScreenMs:F0} ms")
                 : "no head tracking", tracking || gameMode);
             settings.SetCalibrationReady(tracking && !gameMode);
+            settings.SetVrGlasses(link.State == XrShift.Tracking.LinkState.Connected && tracker.HasPose, area.Size, shownOn.RefreshHz);
         };
         liveTimer.Start();
 
@@ -728,15 +733,33 @@ internal static class LiveApp
             {
                 string? why = direct ? "VR mode needs the glasses on the Windows desktop (direct mode is on)."
                     : stationary ? "Switch the glasses to Follow with their button first. In stationary mode they hold one picture still, so a VR game could not follow your head."
-                    : !VrBridge.DriverPresent ? "The VR driver is not part of this copy of XrShift yet."
-                    : VrBridge.SteamVrFolder() is null ? "SteamVR is not installed. Install it from Steam, then try again." : null;
+                    : !fullScreen ? "VR mode needs the glasses: XrShift is running in a test window."
+                    : link.State != XrShift.Tracking.LinkState.Connected || !tracker.HasPose ? "The glasses' head tracking is not connected, so SteamVR would get no head movement. Plug the glasses in and wait for the live numbers at the top of the settings window."
+                    : null;
                 if (why is null)
                 {
-                    SetGameMode(true);
                     try { vrBridge ??= new VrBridge(); }
                     catch (IOException e) { why = "Could not share the head tracking with SteamVR: " + e.Message; }
-                    why ??= VrBridge.Start(area, shownOn.RefreshHz, view.FovDeg);
-                    if (why is not null) SetGameMode(false);
+                }
+                why ??= VrBridge.Ready(vrBridge!.DriverActive);
+                if (why is null)
+                {
+                    SetGameMode(true); // the scene steps aside and the extra monitors go, as in plain screen
+                    ViewWindow.ConfineCursor(null);
+                    VrWire.Display shown = VrWire.DisplayFor(area.X, area.Y, area.Width, area.Height, shownOn.RefreshHz, view.FovDeg, view.DelayMs);
+                    vrBridge!.Begin(shown);
+                    vrMode = true;
+                    why = VrBridge.LaunchSteamVr();
+                    if (why is null)
+                        Log.Line($"VR mode on: glasses at {area}, " +
+                            (shown.SideBySide ? "3D side by side" : "flat (switch the glasses to their 3D mode for depth)") +
+                            $", {shown.RefreshHz:F0} Hz, view angle {shown.FovDeg:F1} degrees; SteamVR starting.");
+                    else
+                    {
+                        vrMode = false;
+                        vrBridge.End();
+                        SetGameMode(false);
+                    }
                 }
                 if (why is not null)
                 {
@@ -745,14 +768,14 @@ internal static class LiveApp
                     MessageBox.Show(settings, why, "XrShift - VR mode", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
-                vrMode = true;
                 settings.Hide(); // nothing of XrShift's should hold the keyboard or the controller during a game
             }
             else
             {
                 vrMode = false;
+                vrBridge?.End(); // the driver asks SteamVR to close, which frees the glasses' screen
                 SetGameMode(false);
-                Log.Line("VR mode off.");
+                Log.Line("VR mode off; SteamVR asked to close.");
             }
             settings.SetVrMode(vrMode);
         }
@@ -2314,6 +2337,14 @@ internal static class LiveApp
         Exception? windowError = s_windowError;
 
         // ---- shutting down -------------------------------------------------------------------------
+        if (vrMode)
+        {
+            // Quitting, or starting again (the glasses changed size): SteamVR would be left drawing into a screen
+            // nobody manages, so it is asked to close.
+            vrMode = false;
+            vrBridge?.End();
+            Log.Line("VR mode ended with this session; SteamVR asked to close.");
+        }
         cursorTimer.Stop();
         handTimer.Stop();
         LetGo(); // never leave the mouse button held down
@@ -2330,6 +2361,7 @@ internal static class LiveApp
         double total = clock.Elapsed.TotalSeconds;
         cts.Cancel();
         reader.Join(3000);
+        vrBridge?.Dispose(); // after the reading thread, which publishes into it
         s_windowError = null;
         if (windowError is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(windowError);
 

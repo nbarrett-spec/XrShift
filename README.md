@@ -39,7 +39,7 @@ XR glasses are a big private screen you can wear. Out of the box, though, Window
 **Play games.**
 
 - **Plain screen:** one click hands the glasses back to Windows as an ordinary monitor, with nothing in between, so games run at full speed.
-- **VR mode (experimental):** play SteamVR games seated. The glasses become a headset that follows your head turns, and a gamepad does the rest. No Man's Sky is a good one to start with.
+- **VR mode (experimental):** play SteamVR games seated. The glasses become a headset that follows your head turns, and a gamepad does the rest. No Man's Sky is a good one to start with. How it works and how to try it: [docs/VR.md](docs/VR.md).
 
 **Read without your glasses on.** If you normally wear glasses or contacts, the best fix is a pair of prescription lenses made for your XR glasses. Software can't change how your eyes focus. Until you have them, **Settings → Without your glasses** helps a lot: one slider sharpens text and boosts contrast, and one button makes every screen bigger.
 
