@@ -184,7 +184,9 @@ public class ControlApiTests : IControlHost
     [InlineData("tell nobody to do it", "No bot by that name.")]
     [InlineData("new bot in narnia", "No project by that name.")]
     [InlineData("new bot in agritec", "Folder is missing.")]
-    [InlineData("make me a sandwich", "Try: open, hide, load, new bot in, or tell ... to ...")]
+    [InlineData("make me a sandwich", "Try: open, hide, load, layout, size, new bot in, or tell ... to ...")]
+    [InlineData("layout tiled", "No layout preset by that name.")]
+    [InlineData("size huge", "No size by that name.")]
     public void WhatWasNotUnderstoodIsSaidBackAndChangesNothing(string heard, string why)
     {
         _deck = _deck.With(new SceneObject { Id = "b2", Label = "Quotes" });
@@ -194,6 +196,56 @@ public class ControlApiTests : IControlHost
         Assert.Empty(_focused);
         Assert.Empty(_told);
         Assert.Empty(_spawned);
+    }
+
+    [Fact]
+    public void PresetsAreListedWithWhatEachDoes()
+    {
+        JsonElement result = Call("""{"jsonrpc":"2.0","id":1,"method":"preset.list"}""").GetProperty("result");
+        Assert.Equal(["Solo", "MainAndSide", "TripleArc", "Stack", "Cockpit"], result.GetProperty("layouts").EnumerateArray().Select(l => l.GetProperty("name").GetString()));
+        Assert.Equal(["Sharp", "Comfort", "Overview"], result.GetProperty("sizes").EnumerateArray().Select(s => s.GetProperty("name").GetString()));
+        Assert.All(result.GetProperty("layouts").EnumerateArray(), l => Assert.False(string.IsNullOrEmpty(l.GetProperty("description").GetString())));
+    }
+
+    [Fact]
+    public void ApplyingAPresetPlacesAndSizesTheScreens()
+    {
+        _workspace = _workspace.WithLayout(_workspace.Current.Layout.Add(new ScreenSpec { Id = "side", Name = "Logs", YawDeg = -40 }));
+        Call("""{"jsonrpc":"2.0","id":1,"method":"preset.apply","params":{"layout":"main and side","size":"comfort"}}""");
+        ScreenSpec laptop = _workspace.Current.Layout.Screens[0], side = _workspace.Current.Layout.Find("side")!;
+        Assert.Equal((0f, Sizes.ComfortScale), (laptop.YawDeg, laptop.Scale));
+        Assert.True(side.Visible && side.YawDeg < 0);
+
+        // A size alone changes every shown screen where it is; with a screen named, only that one.
+        Call("""{"jsonrpc":"2.0","id":2,"method":"preset.apply","params":{"size":"Sharp","main":"side"}}""");
+        Assert.Equal((Sizes.ComfortScale, 1f), (_workspace.Current.Layout.Screens[0].Scale, _workspace.Current.Layout.Find("side")!.Scale));
+        Call("""{"jsonrpc":"2.0","id":3,"method":"preset.apply","params":{"size":"sharp"}}""");
+        Assert.Equal(1f, _workspace.Current.Layout.Screens[0].Scale);
+    }
+
+    [Theory]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"preset.apply"}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"preset.apply","params":{"layout":"tiled"}}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"preset.apply","params":{"layout":"solo","size":"huge"}}""")]
+    [InlineData("""{"jsonrpc":"2.0","id":1,"method":"preset.apply","params":{"layout":"solo","main":"missing"}}""")]
+    public void BadPresetRequestsAreRefused(string line)
+    {
+        Workspace before = _workspace;
+        Assert.Equal(-32602, Call(line).GetProperty("error").GetProperty("code").GetInt32());
+        Assert.Same(before, _workspace);
+    }
+
+    [Fact]
+    public void SpokenPresetsDoWhatTheMatchingRequestsDo()
+    {
+        _workspace = _workspace.WithLayout(_workspace.Current.Layout.Add(new ScreenSpec { Id = "side", Name = "Logs", YawDeg = -40 }));
+        Say("layout solo");
+        Assert.False(_workspace.Current.Layout.Find("side")!.Visible);
+        Assert.Equal(1f, _workspace.Current.Layout.Screens[0].Scale); // Sharp unless a size is said
+        Say("Size: comfort.");
+        Assert.Equal(Sizes.ComfortScale, _workspace.Current.Layout.Screens[0].Scale);
+        Assert.Contains("triple arc", VoiceCommands.LayoutNames);
+        Assert.Contains("overview", VoiceCommands.SizeNames);
     }
 
     [Fact]

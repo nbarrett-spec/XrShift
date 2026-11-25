@@ -20,6 +20,10 @@ public interface IControlHost
     string? Tell(string id, string text);
     /// <summary>Opens a web page as a panel of its own in the room. Null when it was started; otherwise why not.</summary>
     string? OpenWidget(string label, Uri page);
+    /// <summary>The size in pixels of what a screen shows, for the presets. Without the app's help only a virtual monitor's own size is known.</summary>
+    (int Width, int Height) PictureSize(ScreenSpec screen) => screen.PixelWidth > 0 ? (screen.PixelWidth, screen.PixelHeight) : (1920, 1080);
+    /// <summary>The glasses the presets size screens for.</summary>
+    DisplayOptics Optics => DisplayOptics.OnePro;
 }
 
 /// <summary>
@@ -115,6 +119,39 @@ public static class ControlApi
                         return Error(id, InvalidParams, "url must be a full http or https address.");
                     if (host.OpenWidget(label, page) is { } refused) return Error(id, InvalidParams, refused);
                     result = new JsonObject { ["label"] = label };
+                    break;
+                }
+                case "preset.list":
+                    result = new JsonObject
+                    {
+                        ["layouts"] = new JsonArray(Enum.GetValues<LayoutPreset>().Select(l => (JsonNode?)new JsonObject { ["name"] = l.ToString(), ["description"] = Presets.About(l) }).ToArray()),
+                        ["sizes"] = new JsonArray(Enum.GetValues<SizePreset>().Select(s => (JsonNode?)new JsonObject { ["name"] = s.ToString(), ["description"] = Sizes.About(s) }).ToArray()),
+                    };
+                    break;
+                case "preset.apply":
+                {
+                    string? layoutName = Text(p, "layout"), sizeName = Text(p, "size"), mainId = Text(p, "main");
+                    if (layoutName is null && sizeName is null) return Error(id, InvalidParams, "preset.apply needs params.layout or params.size.");
+                    LayoutPreset how = default;
+                    SizePreset size = SizePreset.Sharp;
+                    if (layoutName is not null && !Presets.TryParse(layoutName, out how))
+                        return Error(id, InvalidParams, $"layout must be one of: {string.Join(", ", Enum.GetNames<LayoutPreset>())}.");
+                    if (sizeName is not null && !Presets.TryParse(sizeName, out size))
+                        return Error(id, InvalidParams, $"size must be one of: {string.Join(", ", Enum.GetNames<SizePreset>())}.");
+                    Layout now = host.Workspace.Current.Layout;
+                    ScreenSpec? main = null;
+                    if (mainId is not null && (main = now.Find(mainId)) is null) return Error(id, InvalidParams, "No screen with that id.");
+                    Layout changed;
+                    if (layoutName is not null) changed = Presets.Apply(now, how, size, host.PictureSize, host.Optics, mainId);
+                    else if (main is not null)
+                    {
+                        // A size and a screen, no layout: just that screen changes size, where it is.
+                        (int w, int h) = host.PictureSize(main);
+                        changed = now.With(Sizes.Apply(main, size, w, h, host.Optics));
+                    }
+                    else changed = Sizes.Apply(now, size, host.PictureSize, host.Optics);
+                    host.Use(host.Workspace.WithLayout(changed));
+                    result = new JsonObject { ["layout"] = layoutName is null ? null : how.ToString(), ["size"] = size.ToString() };
                     break;
                 }
                 case "voice.say":
