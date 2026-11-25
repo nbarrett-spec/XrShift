@@ -264,6 +264,56 @@ public class HeadTrackerTests
         Run(sim, tracker, 0.5f, pitchUp: 60);
         Assert.False(MathF.Abs(tracker.GetPose().PitchDeg - 30) < 5);
     }
+
+    // ---- the pose SteamVR gets (VR mode) ----
+
+    [Fact]
+    public void HeadTurned30LeftIsSteamVrsRotationAboutUp()
+    {
+        // SteamVR: right-handed, +Y up, -Z forward. Turning left by 30 degrees is +30 about +Y: w = cos 15, y = sin 15.
+        var (sim, tracker) = Start();
+        Run(sim, tracker, 0.5f, yawLeft: 60);
+        Run(sim, tracker, 0.5f); // still again, so the turn rate has died away
+        Quaternion q = tracker.GetVrPose(out Vector3 turning).Orientation;
+        float c = MathF.Cos(15 * DegToRad), s = MathF.Sin(15 * DegToRad);
+        if (q.W < 0) q = -q; // q and -q are the same turn
+        Assert.True(MathF.Abs(q.W - c) < 0.003f && MathF.Abs(q.Y - s) < 0.005f && MathF.Abs(q.X) < 0.003f && MathF.Abs(q.Z) < 0.003f, $"got {q}");
+        AssertClose(new Vector3(-0.5f, 0, -MathF.Sqrt(3) / 2), Vector3.Transform(-Vector3.UnitZ, q)); // forward swung toward -X
+        Assert.True(turning.Length() < 0.05f, $"still head turns at {turning}");
+    }
+
+    [Fact]
+    public void VrTurnRateIsInTheWorldAndPositiveForLeft()
+    {
+        var (sim, tracker) = Start();
+        Run(sim, tracker, 0.5f, yawLeft: 60);
+        tracker.GetVrPose(out Vector3 turning);
+        AssertClose(new Vector3(0, 60 * DegToRad, 0), turning, 0.05f);
+
+        // A nod after turning 60 degrees left is about the head's right axis, which now points along world
+        // (cos 60, 0, -sin 60): the rate must come out in the world, not in the head's own frame.
+        var (sim2, tracker2) = Start();
+        Run(sim2, tracker2, 0.5f, yawLeft: 120);
+        Run(sim2, tracker2, 0.5f);
+        Run(sim2, tracker2, 0.3f, pitchUp: 40);
+        tracker2.GetVrPose(out Vector3 nodding);
+        AssertClose(new Vector3(0.5f, 0, -MathF.Sqrt(3) / 2) * (40 * DegToRad), nodding, 0.05f);
+    }
+
+    [Fact]
+    public void VrPoseIsNeverHeldForReading()
+    {
+        // Reading steady holds the floating screens through tiny movements; in VR that would feel like the world
+        // sticking to the head, so the VR pose always follows the head itself.
+        var (sim, tracker) = Start();
+        tracker.ReadingSteady = true;
+        Run(sim, tracker, 1f);
+        tracker.GetDisplayPose(0, 0, out _); // reading hold engaged
+        Run(sim, tracker, 0.2f, yawLeft: 1); // 0.2 degrees: inside the hold
+        tracker.GetDisplayPose(0, 0, out _);
+        AssertPose(tracker.GetVrPose(out _), 0.2f, 0, 0, 0.03f);
+        Assert.Equal(tracker.GetPose().Orientation, tracker.GetVrPose(out _).Orientation);
+    }
 }
 
 public class AxisMapTests

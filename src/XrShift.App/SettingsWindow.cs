@@ -607,12 +607,15 @@ internal sealed partial class SettingsWindow : Form
         {
             Title = "VR",
             Subtitle = "Play SteamVR games seated: the glasses become a headset that follows your head as you look around (not as you lean or walk). " +
-                       "1 Glasses in Follow.  2 Start VR here.  3 Start the game from Steam.  Ctrl+Alt+V.",
+                       "Start VR here, then start the game from Steam. Ctrl+Alt+V.",
             BackColor = Ui.Inspector,
         };
-        vr.SetBounds(36 + w + 18, 112, w, 230);
+        vr.SetBounds(36 + w + 18, 112, w, PageHeight - 112 - 22);
+        BuildVrNeeds(vr, w);
         var vrGo = new PillButton();
-        Place(vrGo, vr, "Start VR", 20, 160, 240, 42, PillButton.Looks.Accent, "Ctrl+Alt+V");
+        Place(vrGo, vr, "Start VR", 20, vr.Height - 62, 200, 42, PillButton.Looks.Accent,
+            "Starts SteamVR with the glasses as the headset; registers XrShift's driver with SteamVR first if it is not. Ctrl+Alt+V. " +
+            "Stopping VR mode (the same button or keys) closes SteamVR and brings your screens back.");
         vrGo.Click += (_, _) => VrModeChanged?.Invoke(!_vrOn);
         _gamesPage.Controls.Add(vr);
         _gameButtons = (plainGo, vrGo);
@@ -622,12 +625,13 @@ internal sealed partial class SettingsWindow : Form
             Title = "Tips",
             Subtitle = "·  Set games to borderless windowed, at the size of the screen they are on (1920 x 1080 for the glasses and extra monitors).\n" +
                        "·  VR games that work with a gamepad are the ones to start with, like No Man's Sky.\n" +
-                       "·  For depth in VR, switch the glasses to their 3D mode in their own menu first.\n" +
+                       "·  For depth in VR, switch the glasses to their 3D mode in their own menu before starting VR.\n" +
+                       "·  In VR, Ctrl+Alt+0 makes where you look straight ahead.\n" +
                        "·  Look to point pauses while a game has the mouse, and picks up again when the pointer shows.\n" +
                        "·  On a laptop with two graphics chips, keep the glasses on the USB-C port wired to the stronger one.",
             BackColor = Ui.Inspector,
         };
-        tips.SetBounds(36, 360, ContentWidth - 72, 220);
+        tips.SetBounds(36, 360, w, PageHeight - 360 - 22);
         _gamesPage.Controls.Add(tips);
     }
 

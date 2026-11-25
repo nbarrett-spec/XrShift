@@ -135,13 +135,7 @@ public sealed class HeadTracker
             else _delayMs += (measuredDelayMs - _delayMs) * (1 - MathF.Exp(-dt / DelaySmoothingSeconds));
             lookAheadMs = Math.Clamp(_delayMs + glassesDelayMs, 0f, MathF.Max(0f, MaxLookAheadMs));
 
-            // Predict along the smoothed rate, but never faster than the fresh reading goes that way: when the
-            // head stops or bounces back, the smoothed rate is still running on and would carry the picture past.
-            Vector3 rate = _smoothRate;
-            float smooth = rate.Length();
-            if (smooth > 1e-6f)
-                rate *= Math.Clamp(Vector3.Dot(_filter.Rate, rate) / (smooth * smooth), 0f, 1f);
-            Quaternion q = Ahead(_filter.Orientation, rate, lookAheadMs / 1000f);
+            Quaternion q = Ahead(_filter.Orientation, PredictionRate(), lookAheadMs / 1000f);
 
             // Holding is a deadband: the picture stays put until the head has moved further than the band
             // from it, then is dragged along at the band's edge. Widening the band (engaging) never moves
@@ -161,6 +155,43 @@ public sealed class HeadTracker
             if (gap > _band) _held = Quaternion.Normalize(Quaternion.Slerp(q, _held, _band / gap));
             return PoseFrom(_held);
         }
+    }
+
+    /// <summary>
+    /// The pose for a VR runtime (SteamVR): the head as it is now, with no look-ahead and no reading hold (a held
+    /// picture in VR feels like the world sticking to the head), and how fast it turns, so the runtime can predict
+    /// to its own display time itself. The turn rate is the smoothed one <see cref="GetDisplayPose"/> predicts with,
+    /// so prediction does not amplify sensor noise. Keeps no state, so it does not disturb GetDisplayPose.
+    /// </summary>
+    /// <param name="angularVelocity">Radians per second about the render world's axes (X right, Y up, Z back): +Y is turning left.</param>
+    public HeadPose GetVrPose(out Vector3 angularVelocity)
+    {
+        const float Step = 0.01f; // long enough for float precision, short enough that the turn is a straight line
+        lock (_gate)
+        {
+            Quaternion now = _filter.Orientation;
+            HeadPose pose = PoseFrom(now);
+            // The rate is in the sensor's own frame; turning a moment ahead and comparing gives it in the world.
+            Quaternion turn = PoseFrom(Ahead(now, PredictionRate(), Step)).Orientation * Quaternion.Conjugate(pose.Orientation);
+            if (turn.W < 0) turn = -turn;
+            var axis = new Vector3(turn.X, turn.Y, turn.Z);
+            float sin = axis.Length();
+            angularVelocity = sin < 1e-9f ? Vector3.Zero : axis / sin * (2 * MathF.Atan2(sin, turn.W) / Step);
+            return pose;
+        }
+    }
+
+    /// <summary>
+    /// The smoothed turn rate, but never faster than the fresh reading goes that way: when the head stops or bounces
+    /// back, the smoothed rate is still running on and would carry the picture past. Call under the lock.
+    /// </summary>
+    Vector3 PredictionRate()
+    {
+        Vector3 rate = _smoothRate;
+        float smooth = rate.Length();
+        if (smooth > 1e-6f)
+            rate *= Math.Clamp(Vector3.Dot(_filter.Rate, rate) / (smooth * smooth), 0f, 1f);
+        return rate;
     }
 
     static Quaternion Ahead(Quaternion q, Vector3 rate, float seconds)
