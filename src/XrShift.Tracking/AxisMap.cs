@@ -109,7 +109,7 @@ public sealed record AxisMap(Vector3 Right, Vector3 Up, Vector3 Back)
 public static class TrackingConfig
 {
     /// <summary>A resting gyro reading larger than this (rad/s, about 3 deg/s) is not a believable offset.</summary>
-    const float MaxGyroBias = 0.05f;
+    internal const float MaxGyroBias = 0.05f;
 
     /// <summary>Settings folder. The XRSHIFT_CONFIG environment variable overrides it, for trial runs.</summary>
     public static string Folder =>
